@@ -21,7 +21,12 @@ namespace AswTransferToPantheon.Services.Implementation
         public async Task TransferArtikliPaket(int batchSize, CancellationToken token)
         {
             await TransferArtikli(batchSize, token);
+            await TransferArtikliDobavljaci(batchSize, token);
 
+            // Kasnije redom:
+            // await TransferArtikliOsobine(batchSize, token);
+            // await TransferBarkodovi(batchSize, token);
+            // await TransferRobneGrupe(batchSize, token);
             // Kasnije redom:
             // await TransferArtikliDobavljaci(batchSize, token);
             // await TransferArtikliOsobine(batchSize, token);
@@ -29,37 +34,60 @@ namespace AswTransferToPantheon.Services.Implementation
             // await TransferRobneGrupe(batchSize, token);
         }
 
+        
+
         private async Task TransferArtikli(int batchSize, CancellationToken token)
         {
-            /* long lastId = 0;
-
-             while (!token.IsCancellationRequested)
-             {
-                 var artikli = await ReadArtikliBatch(lastId, batchSize, token);
-
-                 if (artikli.Count == 0)
-                 {
-                     break;
-                 }
-
-                 // Za sada samo čitamo.
-                 // Sledeći korak će biti: upis u SQL tmp tabelu.
-
-                 lastId = artikli[^1].Id;
-             }*/
             long lastId = 0;
 
-            var artikli = await ReadArtikliBatch(lastId, batchSize, token);
-
-            if (artikli.Count == 0)
+            while (!token.IsCancellationRequested)
             {
-                return;
+                var artikli = await ReadArtikliBatch(lastId, batchSize, token);
+
+                if (artikli.Count == 0)
+                {
+                    break;
+                }
+
+                await SaveArtikliToTmpTable(artikli, token);
+
+                lastId = artikli[^1].Id;
             }
+            /*    
+               long lastId = 0;
 
-            await SaveArtikliToTmpTable(artikli, token);
+               var artikli = await ReadArtikliBatch(lastId, batchSize, token);
 
+               if (artikli.Count == 0)
+               {
+                   return;
+               }
+
+               await SaveArtikliToTmpTable(artikli, token);
+               */
             //await SaveArtikliToTestFile(artikli, token);
         }
+
+        private async Task TransferArtikliDobavljaci(int batchSize, CancellationToken token)
+        {
+            long lastId = 0;
+
+            while (!token.IsCancellationRequested)
+            {
+                var artikliDobavljaci = await ReadArtikliDobavljaciBatch(lastId, batchSize, token);
+
+                if (artikliDobavljaci.Count == 0)
+                {
+                    break;
+                }
+
+                await SaveArtikliDobavljaciToTmpTable(artikliDobavljaci, token);
+
+                lastId = artikliDobavljaci[^1].Id;
+            }
+        }
+
+        
 
         private async Task SaveArtikliToTmpTable(List<Artikal> artikli, CancellationToken token)
         {
@@ -83,11 +111,107 @@ namespace AswTransferToPantheon.Services.Implementation
             }
         }
 
+        private async Task SaveArtikliDobavljaciToTmpTable(List<ArtikalDobavljac> artikliDobavljaci, CancellationToken token)
+        {
+            await using var connection = new SqlConnection(connectionStrings.Transfer);
+            await connection.OpenAsync(token);
+
+            await using var transaction = await connection.BeginTransactionAsync(token);
+
+            try
+            {
+                await ClearArtikliDobavljaciTmp(connection, (SqlTransaction)transaction, token);
+                await BulkInsertArtikliDobavljaciTmp(connection, (SqlTransaction)transaction, artikliDobavljaci, token);
+                await MergeArtikliDobavljaci(connection, (SqlTransaction)transaction, token);
+
+                await transaction.CommitAsync(token);
+            }
+            catch
+            {
+                await transaction.RollbackAsync(token);
+                throw;
+            }
+        }
+
+        private async Task BulkInsertArtikliDobavljaciTmp(SqlConnection connection, SqlTransaction transaction, List<ArtikalDobavljac> artikliDobavljaci, CancellationToken token)
+        {
+            var table = CreateArtikliDobavljaciDataTable(artikliDobavljaci);
+
+            using var bulkCopy = new SqlBulkCopy(
+                connection,
+                SqlBulkCopyOptions.CheckConstraints,
+                transaction);
+
+            bulkCopy.DestinationTableName = "dbo._tb_ARTIKLIDOBAVLJACI_TMP";
+            bulkCopy.BatchSize = artikliDobavljaci.Count;
+            bulkCopy.BulkCopyTimeout = 60;
+
+            bulkCopy.ColumnMappings.Add("ID", "ID");
+            bulkCopy.ColumnMappings.Add("IDARTIKLA", "IDARTIKLA");
+            bulkCopy.ColumnMappings.Add("KOMITENTTIP", "KOMITENTTIP");
+            bulkCopy.ColumnMappings.Add("KOMITENT", "KOMITENT");
+            bulkCopy.ColumnMappings.Add("REGIJA", "REGIJA");
+            bulkCopy.ColumnMappings.Add("PRIORITET", "PRIORITET");
+            bulkCopy.ColumnMappings.Add("VREMEOD", "VREMEOD");
+            bulkCopy.ColumnMappings.Add("VREMEDO", "VREMEDO");
+
+            await bulkCopy.WriteToServerAsync(table, token);
+        }
+
+        private static DataTable CreateArtikliDobavljaciDataTable(List<ArtikalDobavljac> artikliDobavljaci)
+        {
+            var table = new DataTable();
+
+            table.Columns.Add("ID", typeof(decimal));
+            table.Columns.Add("IDARTIKLA", typeof(decimal));
+            table.Columns.Add("KOMITENTTIP", typeof(string));
+            table.Columns.Add("KOMITENT", typeof(decimal));
+            table.Columns.Add("REGIJA", typeof(string));
+            table.Columns.Add("PRIORITET", typeof(decimal));
+            table.Columns.Add("VREMEOD", typeof(DateTime));
+            table.Columns.Add("VREMEDO", typeof(DateTime));
+
+            foreach (var item in artikliDobavljaci)
+            {
+                table.Rows.Add(
+                    Convert.ToDecimal(item.Id),
+                    Convert.ToDecimal(item.IdArtikla),
+                    Required(item.KomitentTip, item.Id, nameof(item.KomitentTip)),
+                    Convert.ToDecimal(item.Komitent),
+                    DbValue(item.Regija),
+                    Convert.ToDecimal(item.Prioritet),
+                    item.VremeOd,
+                    item.VremeDo);
+            }
+
+            return table;
+        }
+
+        private async Task ClearArtikliDobavljaciTmp(SqlConnection connection, SqlTransaction transaction, CancellationToken token)
+        {
+            await using var command = connection.CreateCommand();
+            command.Transaction = transaction;
+            command.CommandText = "TRUNCATE TABLE dbo._tb_ARTIKLIDOBAVLJACI_TMP;";
+
+            await command.ExecuteNonQueryAsync(token);
+        }
+
         private static async Task MergeArtikli(SqlConnection connection, SqlTransaction transaction, CancellationToken token)
         {
             await using var command = connection.CreateCommand();
             command.Transaction = transaction;
             command.CommandText = "dbo._pr_MergeArtikli";
+            command.CommandType = CommandType.StoredProcedure;
+            command.CommandTimeout = 120;
+
+            await command.ExecuteNonQueryAsync(token);
+        }
+
+        private static async Task MergeArtikliDobavljaci(SqlConnection connection, SqlTransaction transaction, CancellationToken token)
+        {
+            await using var command = connection.CreateCommand();
+            command.Transaction = transaction;
+            command.CommandText = "dbo._pr_MergeArtikliDobavljaci";
             command.CommandType = CommandType.StoredProcedure;
             command.CommandTimeout = 120;
 
@@ -177,6 +301,64 @@ namespace AswTransferToPantheon.Services.Implementation
             return result;
         }
 
+        private async Task<List<ArtikalDobavljac>> ReadArtikliDobavljaciBatch(long lastId, int batchSize, CancellationToken token)
+        {
+            const string sql = """
+            SELECT
+                ID,
+                ARTIKAL,
+                KOMITENTTIP,
+                KOMITENT,
+                REGIJA,
+                PRIORITET,
+                VREMEOD,
+                VREMEDO
+            FROM IIS.ARTIKLIDOBAVLJACI
+            WHERE ID > :lastId
+              AND KOMITENT LIKE '9%'
+              AND VREMEDO > SYSDATE
+              AND ARTIKAL IN (
+                  SELECT ID
+                  FROM IIS.ARTIKLI
+                  WHERE TIP = 'R'
+              )
+              AND LENGTH(KOMITENT) = 6
+            ORDER BY ID
+            FETCH NEXT :batchSize ROWS ONLY
+            """;
+
+            var result = new List<ArtikalDobavljac>(batchSize);
+
+            await using var connection = new OracleConnection(BuildOracleConnectionString());
+            await connection.OpenAsync();
+
+            await using var command = connection.CreateCommand();
+            command.CommandText = sql;
+            command.BindByName = true;
+
+            command.Parameters.Add("lastId", OracleDbType.Int64).Value = lastId;
+            command.Parameters.Add("batchSize", OracleDbType.Int32).Value = batchSize;
+
+            await using var reader = await command.ExecuteReaderAsync(token);
+
+            while (await reader.ReadAsync(token))
+            {
+                result.Add(new ArtikalDobavljac
+                {
+                    Id = GetInt64(reader, "ID"),
+                    IdArtikla = GetInt64(reader, "ARTIKAL"),
+                    KomitentTip = GetString(reader, "KOMITENTTIP"),
+                    
+                    Komitent = GetInt64(reader, "KOMITENT"),
+                    Prioritet = GetRequiredInt32(reader, "PRIORITET"),
+                    VremeOd = GetRequiredDateTime(reader, "VREMEOD"),
+                    VremeDo = GetRequiredDateTime(reader, "VREMEDO")
+                });
+            }
+
+            return result;
+        }
+
         private static string? GetString(OracleDataReader reader, string columnName)
         {
             var ordinal = reader.GetOrdinal(columnName);
@@ -194,7 +376,29 @@ namespace AswTransferToPantheon.Services.Implementation
             var ordinal = reader.GetOrdinal(columnName);
             return Convert.ToInt64(reader.GetValue(ordinal));
         }
+        private static int GetRequiredInt32(OracleDataReader reader, string columnName)
+        {
+            var ordinal = reader.GetOrdinal(columnName);
 
+            if (reader.IsDBNull(ordinal))
+            {
+                throw new InvalidOperationException($"Oracle kolona {columnName} je NULL, a obavezna je.");
+            }
+
+            return Convert.ToInt32(reader.GetValue(ordinal));
+        }
+
+        private static DateTime GetRequiredDateTime(OracleDataReader reader, string columnName)
+        {
+            var ordinal = reader.GetOrdinal(columnName);
+
+            if (reader.IsDBNull(ordinal))
+            {
+                throw new InvalidOperationException($"Oracle kolona {columnName} je NULL, a obavezna je.");
+            }
+
+            return reader.GetDateTime(ordinal);
+        }
         private string BuildOracleConnectionString()
         {
             var builder = new OracleConnectionStringBuilder
@@ -207,10 +411,7 @@ namespace AswTransferToPantheon.Services.Implementation
             return builder.ConnectionString;
         }
 
-        private static async Task ClearArtikliTmp(
-                                                  SqlConnection connection,
-                                                    SqlTransaction transaction,
-                                                    CancellationToken token)
+        private static async Task ClearArtikliTmp(SqlConnection connection, SqlTransaction transaction, CancellationToken token)
         {
             await using var command = connection.CreateCommand();
             command.Transaction = transaction;
@@ -219,11 +420,7 @@ namespace AswTransferToPantheon.Services.Implementation
             await command.ExecuteNonQueryAsync(token);
         }
 
-        private static async Task BulkInsertArtikliTmp(
-            SqlConnection connection,
-            SqlTransaction transaction,
-            List<Artikal> artikli,
-            CancellationToken token)
+        private static async Task BulkInsertArtikliTmp(SqlConnection connection, SqlTransaction transaction, List<Artikal> artikli, CancellationToken token)
         {
             var table = CreateArtikliDataTable(artikli);
 
