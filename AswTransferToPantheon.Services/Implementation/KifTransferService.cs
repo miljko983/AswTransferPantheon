@@ -2,7 +2,7 @@
 
 namespace AswTransferToPantheon.Services.Implementation
 {
-    public class KifTransfer : IKifTransfer
+    public class KifTransferService : IKifTransferService
     {
         public async Task Transfer(int batchSize, CancellationToken token)
         {

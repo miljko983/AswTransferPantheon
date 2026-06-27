@@ -6,8 +6,8 @@ using System.Threading.Tasks;
 
 namespace AswTransferToPantheon.Services.Interfaces
 {
-    public interface IKifTransfer
+    public interface IArtikliTransferService
     {
-        Task Transfer(int batchSize, CancellationToken token);
+        Task TransferArtikliPaket(int batchSize, CancellationToken token);
     }
 }

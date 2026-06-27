@@ -4,7 +4,6 @@ using AswTransferToPantheon.Services.Interfaces;
 using AswTransferToPantheon.ViewModels.Base;
 using Microsoft.Data.SqlClient;
 using Microsoft.Extensions.Options;
-using Oracle.ManagedDataAccess.Client;
 using System.Collections.ObjectModel;
 using System.Windows.Input;
 using System.Windows.Threading;
@@ -60,10 +59,17 @@ namespace AswTransferToPantheon.ViewModels
 
         private async Task OnLoaded()
         {
+            /*   var connectionStringBuilder = new SqlConnectionStringBuilder(connectionStrings.Value.Transfer);
+               TransferDb = $"{connectionStringBuilder.DataSource}: {connectionStringBuilder.InitialCatalog}";
+               var oracleCsb = new OracleConnectionStringBuilder(connectionStrings.Value.Asw);
+               SourceDb = oracleCsb.DataSource;
+               await RunTasks();*/
+
             var connectionStringBuilder = new SqlConnectionStringBuilder(connectionStrings.Value.Transfer);
             TransferDb = $"{connectionStringBuilder.DataSource}: {connectionStringBuilder.InitialCatalog}";
-            var oracleCsb = new OracleConnectionStringBuilder(connectionStrings.Value.Asw);
-            SourceDb = oracleCsb.DataSource;
+
+            SourceDb = "10.164.3.17:1521/log";
+
             await RunTasks();
         }
 

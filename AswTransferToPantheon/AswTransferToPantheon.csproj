@@ -24,7 +24,6 @@
     <PackageReference Include="Microsoft.Extensions.DependencyInjection" Version="10.0.9" />
     <PackageReference Include="Microsoft.Extensions.Hosting" Version="10.0.9" />
     <PackageReference Include="Microsoft.Xaml.Behaviors.Wpf" />
-    <PackageReference Include="Oracle.ManagedDataAccess" Version="23.26.200" />
   </ItemGroup>
 
   <ItemGroup>

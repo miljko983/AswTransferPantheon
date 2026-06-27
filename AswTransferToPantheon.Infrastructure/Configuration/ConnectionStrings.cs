@@ -8,8 +8,8 @@ namespace AswTransferToPantheon.Infrastructure.Configuration
 {
     public class ConnectionStrings
     {
-        public string Asw { get; set; }
+        public string AswPassword { get; set; } = string.Empty;
 
-        public string Transfer { get; set; }
+        public string Transfer { get; set; } = string.Empty;
     }
 }

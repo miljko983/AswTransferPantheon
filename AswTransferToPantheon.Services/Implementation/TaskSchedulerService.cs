@@ -11,18 +11,22 @@ namespace AswTransferToPantheon.Services.Implementation
         private const string ExecutionTimesPath = "executiontimes.json";
         private static readonly object TaskLock = new object();
         private readonly IOptions<SchedulerConfiguration> schedulerConfiguration;
-        private readonly IKifTransfer kifTransferService;
+        private readonly IKifTransferService kifTransferService;
         private Dictionary<string, DateTime> executionTimes = null!;
         private readonly CancellationTokenSource cancellationTokenSource = new CancellationTokenSource();
+        private readonly IArtikliTransferService artikliTransferService;
 
         public Action<string> LogAction { get; set; }
 
         public Action<Exception, string> LogErrorAction { get; set; }
 
-        public TaskSchedulerService(IOptions<SchedulerConfiguration> schedulerConfiguration, IKifTransfer kifTransferService)
+        public TaskSchedulerService(IOptions<SchedulerConfiguration> schedulerConfiguration, 
+                                    IKifTransferService kifTransferService, 
+                                    IArtikliTransferService artikliTransferService)
         {
             this.schedulerConfiguration = schedulerConfiguration;
             this.kifTransferService = kifTransferService;
+            this.artikliTransferService = artikliTransferService;
         }
 
         public Task ScheduleTasks()
@@ -125,12 +129,28 @@ namespace AswTransferToPantheon.Services.Implementation
 
         private Task ScheduleDailyTask(DailyTask dtc, bool firstTime)
         {
+            /*  DateTime lastExecution;
+              executionTimes.TryGetValue(dtc.Name, out lastExecution);
+              var nextTime = GetDailyStartTime(dtc.Start);
+              if (firstTime && lastExecution.Date != DateTime.Now.Date && nextTime <= DateTime.Now)
+              {
+                  nextTime = DateTime.Now;
+              }
+
+              _ = ScheduleNextDaily(dtc, nextTime);
+              return Task.CompletedTask;*/
             DateTime lastExecution;
             executionTimes.TryGetValue(dtc.Name, out lastExecution);
-            var nextTime = GetDailyStartTime(dtc.Start);
-            if (firstTime && lastExecution.Date != DateTime.Now.Date && nextTime <= DateTime.Now)
+
+            DateTime nextTime;
+
+            if (firstTime && dtc.ExecuteOnStartup)
             {
                 nextTime = DateTime.Now;
+            }
+            else
+            {
+                nextTime = GetDailyStartTime(dtc.Start);
             }
 
             _ = ScheduleNextDaily(dtc, nextTime);
@@ -171,14 +191,20 @@ namespace AswTransferToPantheon.Services.Implementation
             {
                 await GetTask(task, batchSize);
             }
+
+            foreach (var task in dailyTask.ParallelTasks)
+            {
+                await GetTask(task, batchSize);
+            }
         }
 
         private static DateTime GetDailyStartTime(TimeSpan start)
         {
             var nextTime = DateTime.Now.Date.Add(start);
+
             while (nextTime < DateTime.Now)
             {
-                nextTime.AddDays(1);
+                nextTime = nextTime.AddDays(1);
             }
 
             return nextTime;
@@ -205,8 +231,7 @@ namespace AswTransferToPantheon.Services.Implementation
 
         private async Task TransferArtikli(int batchSize)
         {
-            // prebaci artikle i td.
-            // ucitaj artikle
+            await artikliTransferService.TransferArtikliPaket(batchSize, cancellationTokenSource.Token);
         }
 
         private void SaveExecutionTimes()
@@ -245,6 +270,6 @@ namespace AswTransferToPantheon.Services.Implementation
         public void CancelTasks()
         {
             cancellationTokenSource.Cancel();
-        }
+        }               
     }
 }

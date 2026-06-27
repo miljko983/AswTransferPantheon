@@ -20,25 +20,30 @@ namespace AswTransferToPantheon
         public App()
         {
             _host = Host.CreateDefaultBuilder()
-                .ConfigureAppConfiguration((context, configuration) =>
-                {
-                    configuration.SetBasePath(AppContext.BaseDirectory);
-                    configuration.AddJsonFile(
-                        "appsettings.json",
-                        optional: false,
-                        reloadOnChange: true);
-                })
-                .ConfigureServices((context, services) =>
-                {
-                    services.AddSingleton<MainWindow>();
-                    services.AddTransient<MainWindowViewModel>();
-                    services.Configure<ConnectionStrings>(context.Configuration.GetSection(nameof(ConnectionStrings)));
-                    services.Configure<SchedulerConfiguration>(context.Configuration.GetSection("Scheduler"));
+        .ConfigureAppConfiguration((context, configuration) =>
+        {
+            configuration.SetBasePath(AppContext.BaseDirectory);
+            configuration.AddJsonFile(
+                "appsettings.json",
+                optional: false,
+                reloadOnChange: true);
+        })
+        .ConfigureServices((context, services) =>
+        {
+            services.AddSingleton<MainWindow>();
+            services.AddTransient<MainWindowViewModel>();
 
-                    services.AddSingleton<ITaskSchedulerService, TaskSchedulerService>();
-                    services.AddTransient<IKifTransfer, KifTransfer>();
-                })
-                .Build();
+            services.Configure<ConnectionStrings>(
+                context.Configuration.GetSection(nameof(ConnectionStrings)));
+
+            services.Configure<SchedulerConfiguration>(
+                context.Configuration.GetSection("Scheduler"));
+
+            services.AddSingleton<ITaskSchedulerService, TaskSchedulerService>();
+            services.AddTransient<IKifTransferService, KifTransferService>();
+            services.AddTransient<IArtikliTransferService, ArtikliTransferService>();
+        })
+        .Build();
         }
 
         protected override async void OnStartup(StartupEventArgs e)
