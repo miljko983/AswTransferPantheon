@@ -54,7 +54,8 @@
             Grid.RowSpan="2"
             Grid.Column="0"
             Grid.ColumnSpan="5"
-            ItemsSource="{Binding Path=Messages, UpdateSourceTrigger=PropertyChanged}">
+            ItemsSource="{Binding Path=Messages, UpdateSourceTrigger=PropertyChanged}"
+            ScrollViewer.VerticalScrollBarVisibility="Auto">
             <ListView.ItemTemplate>
                 <DataTemplate>
                     <Grid Margin="4">

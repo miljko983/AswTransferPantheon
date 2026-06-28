@@ -25,9 +25,9 @@ namespace AswTransferToPantheon.Services.Implementation
             await ExecuteWithLogging("Artikli", () => TransferArtikli(batchSize, token));
             await ExecuteWithLogging("Artikli dobavljači",() => TransferArtikliDobavljaci(batchSize, token));
             await ExecuteWithLogging("Artikli osobine",() => TransferArtikliOsobine(batchSize, token));
+            await ExecuteWithLogging("Barkodovi", () => TransferBarkodovi(batchSize, token));
 
             // Kasnije redom:
-            // await TransferBarkodovi(batchSize, token);
             // await TransferRobneGrupe(batchSize, token);
             // Kasnije redom:
             // await TransferArtikliDobavljaci(batchSize, token);
@@ -214,6 +214,17 @@ namespace AswTransferToPantheon.Services.Implementation
             await using var command = connection.CreateCommand();
             command.Transaction = transaction;
             command.CommandText = "dbo._pr_MergeArtikliDobavljaci";
+            command.CommandType = CommandType.StoredProcedure;
+            command.CommandTimeout = 120;
+
+            await command.ExecuteNonQueryAsync(token);
+        }
+
+        private static async Task MergeBarkodovi(SqlConnection connection, SqlTransaction transaction, CancellationToken token)
+        {
+            await using var command = connection.CreateCommand();
+            command.Transaction = transaction;
+            command.CommandText = "dbo._pr_MergeBarkodovi";
             command.CommandType = CommandType.StoredProcedure;
             command.CommandTimeout = 120;
 
@@ -764,6 +775,52 @@ namespace AswTransferToPantheon.Services.Implementation
             return table;
         }
 
+        private async Task<List<Barkod>> ReadBarkodoviBatch(long lastId, int batchSize, CancellationToken token)
+        {
+                const string sql = """
+            SELECT
+                ID,
+                BARKOD,
+                ARTIKAL,
+                VARIJANTA,
+                JEDINICAMERE,
+                REDNIBROJ
+            FROM IIS.BARKODOVI
+            WHERE ID > :lastId
+            ORDER BY ID
+            FETCH NEXT :batchSize ROWS ONLY
+            """;
+
+            var result = new List<Barkod>(batchSize);
+
+            await using var connection = new OracleConnection(BuildOracleConnectionString());
+            await connection.OpenAsync();
+
+            await using var command = connection.CreateCommand();
+            command.CommandText = sql;
+            command.BindByName = true;
+
+            command.Parameters.Add("lastId", OracleDbType.Int64).Value = lastId;
+            command.Parameters.Add("batchSize", OracleDbType.Int32).Value = batchSize;
+
+            await using var reader = await command.ExecuteReaderAsync(token);
+
+            while (await reader.ReadAsync(token))
+            {
+                result.Add(new Barkod
+                {
+                    Id = GetInt64(reader, "ID"),
+                    BarkodVrednost = GetString(reader, "BARKOD"),
+                    IdArtikla = GetInt64(reader, "ARTIKAL"),
+                    Varijanta = GetString(reader, "VARIJANTA"),
+                    JedinicaMere = GetString(reader, "JEDINICAMERE"),
+                    RedniBroj = GetRequiredInt32(reader, "REDNIBROJ")
+                });
+            }
+
+            return result;
+        }
+
         private static async Task MergeArtikliOsobine(SqlConnection connection, SqlTransaction transaction, CancellationToken token)
         {
             await using var command = connection.CreateCommand();
@@ -792,6 +849,104 @@ namespace AswTransferToPantheon.Services.Implementation
 
                 lastId = artikliOsobine[^1].IdArtikla;
             }
+        }
+
+        private async Task TransferBarkodovi(int batchSize, CancellationToken token)
+        {
+            long lastId = 0;
+
+            while (!token.IsCancellationRequested)
+            {
+                var barkodovi = await ReadBarkodoviBatch(lastId, batchSize, token);
+
+                if (barkodovi.Count == 0)
+                {
+                    break;
+                }
+
+                await SaveBarkodoviToTmpTable(barkodovi, token);
+
+                lastId = barkodovi[^1].Id;
+            }
+        }
+
+        private async Task SaveBarkodoviToTmpTable(List<Barkod> barkodovi, CancellationToken token)
+        {
+            await using var connection = new SqlConnection(connectionStrings.Transfer);
+            await connection.OpenAsync(token);
+
+            await using var transaction = await connection.BeginTransactionAsync(token);
+
+            try
+            {
+                await ClearBarkodoviTmp(connection, (SqlTransaction)transaction, token);
+                await BulkInsertBarkodoviTmp(connection, (SqlTransaction)transaction, barkodovi, token);
+                await MergeBarkodovi(connection, (SqlTransaction)transaction, token);
+
+                await transaction.CommitAsync(token);
+            }
+            catch
+            {
+                await transaction.RollbackAsync(token);
+                throw;
+            }
+        }
+
+        private async Task BulkInsertBarkodoviTmp(SqlConnection connection, SqlTransaction transaction, List<Barkod> barkodovi, CancellationToken token)
+        {
+            var table = CreateBarkodoviDataTable(barkodovi);
+
+            using var bulkCopy = new SqlBulkCopy(
+                connection,
+                SqlBulkCopyOptions.CheckConstraints,
+                transaction);
+
+            bulkCopy.DestinationTableName = "dbo._tb_BARKODOVI_TMP";
+            bulkCopy.BatchSize = barkodovi.Count;
+            bulkCopy.BulkCopyTimeout = 60;
+
+            bulkCopy.ColumnMappings.Add("ID", "ID");
+            bulkCopy.ColumnMappings.Add("BARKOD", "BARKOD");
+            bulkCopy.ColumnMappings.Add("IDARTIKLA", "IDARTIKLA");
+            bulkCopy.ColumnMappings.Add("VARIJANTA", "VARIJANTA");
+            bulkCopy.ColumnMappings.Add("JEDINICAMERE", "JEDINICAMERE");
+            bulkCopy.ColumnMappings.Add("REDNIBROJ", "REDNIBROJ");
+
+            await bulkCopy.WriteToServerAsync(table, token);
+        }
+
+        private static DataTable CreateBarkodoviDataTable(List<Barkod> barkodovi)
+        {
+            var table = new DataTable();
+
+            table.Columns.Add("ID", typeof(decimal));
+            table.Columns.Add("BARKOD", typeof(string));
+            table.Columns.Add("IDARTIKLA", typeof(decimal));
+            table.Columns.Add("VARIJANTA", typeof(string));
+            table.Columns.Add("JEDINICAMERE", typeof(string));
+            table.Columns.Add("REDNIBROJ", typeof(decimal));
+
+            foreach (var item in barkodovi)
+            {
+                table.Rows.Add(
+                    Convert.ToDecimal(item.Id),
+                    Required(item.BarkodVrednost, item.Id, nameof(item.BarkodVrednost)),
+                    Convert.ToDecimal(item.IdArtikla),
+                    Required(item.Varijanta, item.Id, nameof(item.Varijanta)),
+                    DbValue(item.JedinicaMere),
+                    Convert.ToDecimal(item.RedniBroj));
+            }
+
+            return table;
+        }
+
+        private async Task ClearBarkodoviTmp(SqlConnection connection, SqlTransaction transaction, CancellationToken token)
+        {
+            await using var command = connection.CreateCommand();
+            command.Transaction = transaction;
+            command.CommandText = "TRUNCATE TABLE dbo._tb_BARKODOVI_TMP;";
+
+            await command.ExecuteNonQueryAsync(token);
         }
 
         private async Task SaveArtikliOsobineToTmpTable(List<ArtikalOsobine> artikliOsobine, CancellationToken token)
