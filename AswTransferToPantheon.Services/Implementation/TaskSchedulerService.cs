@@ -231,6 +231,8 @@ namespace AswTransferToPantheon.Services.Implementation
 
         private async Task TransferArtikli(int batchSize)
         {
+            artikliTransferService.LogAction = LogAction;
+
             await artikliTransferService.TransferArtikliPaket(batchSize, cancellationTokenSource.Token);
         }
 

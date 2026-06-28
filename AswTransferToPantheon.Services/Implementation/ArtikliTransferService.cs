@@ -6,6 +6,7 @@ using Oracle.ManagedDataAccess.Client;
 using System.Text.Json;
 using Microsoft.Data.SqlClient;
 using System.Data;
+using System.Diagnostics;
 
 namespace AswTransferToPantheon.Services.Implementation
 {
@@ -13,6 +14,7 @@ namespace AswTransferToPantheon.Services.Implementation
     {
         private readonly ConnectionStrings connectionStrings;
 
+        public Action<string> LogAction { get; set; }
         public ArtikliTransferService(IOptions<ConnectionStrings> connectionStrings)
         {
             this.connectionStrings = connectionStrings.Value;
@@ -20,11 +22,11 @@ namespace AswTransferToPantheon.Services.Implementation
 
         public async Task TransferArtikliPaket(int batchSize, CancellationToken token)
         {
-            await TransferArtikli(batchSize, token);
-            await TransferArtikliDobavljaci(batchSize, token);
+            await ExecuteWithLogging("Artikli", () => TransferArtikli(batchSize, token));
+            await ExecuteWithLogging("Artikli dobavljači",() => TransferArtikliDobavljaci(batchSize, token));
+            await ExecuteWithLogging("Artikli osobine",() => TransferArtikliOsobine(batchSize, token));
 
             // Kasnije redom:
-            // await TransferArtikliOsobine(batchSize, token);
             // await TransferBarkodovi(batchSize, token);
             // await TransferRobneGrupe(batchSize, token);
             // Kasnije redom:
@@ -359,6 +361,7 @@ namespace AswTransferToPantheon.Services.Implementation
             return result;
         }
 
+        //HELPERI
         private static string? GetString(OracleDataReader reader, string columnName)
         {
             var ordinal = reader.GetOrdinal(columnName);
@@ -375,6 +378,11 @@ namespace AswTransferToPantheon.Services.Implementation
         {
             var ordinal = reader.GetOrdinal(columnName);
             return Convert.ToInt64(reader.GetValue(ordinal));
+        }
+        private static int? GetInt32(OracleDataReader reader, string columnName)
+        {
+            var ordinal = reader.GetOrdinal(columnName);
+            return reader.IsDBNull(ordinal) ? null : Convert.ToInt32(reader.GetValue(ordinal));
         }
         private static int GetRequiredInt32(OracleDataReader reader, string columnName)
         {
@@ -399,6 +407,42 @@ namespace AswTransferToPantheon.Services.Implementation
 
             return reader.GetDateTime(ordinal);
         }
+
+
+        private static object DbLongAsDecimalValue(long? value)
+        {
+            return value is null ? DBNull.Value : Convert.ToDecimal(value.Value);
+        }
+
+        private static object DbIntAsDecimalValue(int? value)
+        {
+            return value is null ? DBNull.Value : Convert.ToDecimal(value.Value);
+        }
+
+        private async Task ExecuteWithLogging(string name, Func<Task> action)
+        {
+            LogAction?.Invoke($"{name} - počinje...");
+
+            var stopwatch = Stopwatch.StartNew();
+
+            try
+            {
+                await action();
+
+                stopwatch.Stop();
+
+                LogAction?.Invoke($"{name} - završeno za {stopwatch.Elapsed.TotalSeconds:N2} sekundi");
+            }
+            catch (Exception ex)
+            {
+                stopwatch.Stop();
+
+                LogAction?.Invoke($"{name} - greška posle {stopwatch.Elapsed.TotalSeconds:N2} sekundi: {ex.Message}");
+
+                throw;
+            }
+        }
+
         private string BuildOracleConnectionString()
         {
             var builder = new OracleConnectionStringBuilder
@@ -489,6 +533,319 @@ namespace AswTransferToPantheon.Services.Implementation
             return table;
         }
 
+        private async Task<List<ArtikalOsobine>> ReadArtikliOsobineBatch(long lastId, int batchSize, CancellationToken token)
+        {
+            const string sql = """
+            SELECT
+                ARTIKAL,
+                OSNOVNASIFRA,
+                OPCIJA,
+                KATALOSKAOZNAKA,
+                MALOPRODAJNAJM,
+                VELEPRODAJNAJM,
+                NARUCIVANJEJM,
+                IZDAVANJEJM,
+                TIPVARIJANTE,
+                KOMITENTTIP,
+                KOMITENT,
+                AKCIZA,
+                TAKSA,
+                TARIFNISTAV,
+                STAMPATIBARKOD,
+                REFERENT,
+                SERIJA,
+                KONSIGNACIJA,
+                ROKTRAJANJA,
+                ROKTRAJANJADANA,
+                BREND,
+                PROIZVODJACTIP,
+                PROIZVODJAC,
+                REFERENTNABAVKE,
+                TIPZALIHE,
+                AKTIVAN,
+                ASORTIMAN,
+                KATEGORIJA,
+                TRANSPORTJM,
+                ODNOSPOLICA,
+                ODNOSPALETA,
+                TEZINA,
+                ZAPREMINA,
+                DUZINA,
+                SIRINA,
+                VISINA,
+                VISINAPALETE,
+                DRZAVA,
+                VALUTA,
+                ROKISPORUKE,
+                SERIJAMLP,
+                ROKTRAJANJAMLP,
+                EKOLOSKANAKNADA,
+                JEDINICNAMPJM,
+                MLPJMPAR,
+                OPIS
+            FROM IIS.ARTIKLIOSOBINE
+            WHERE ARTIKAL > :lastId
+            ORDER BY ARTIKAL
+            FETCH NEXT :batchSize ROWS ONLY
+            """;
+
+            var result = new List<ArtikalOsobine>(batchSize);
+
+            await using var connection = new OracleConnection(BuildOracleConnectionString());
+            await connection.OpenAsync();
+
+            await using var command = connection.CreateCommand();
+            command.CommandText = sql;
+            command.BindByName = true;
+
+            command.Parameters.Add("lastId", OracleDbType.Int64).Value = lastId;
+            command.Parameters.Add("batchSize", OracleDbType.Int32).Value = batchSize;
+
+            await using var reader = await command.ExecuteReaderAsync(token);
+
+            while (await reader.ReadAsync(token))
+            {
+                result.Add(new ArtikalOsobine
+                {
+                    IdArtikla = GetInt64(reader, "ARTIKAL"),
+                    OsnovnaSifra = GetString(reader, "OSNOVNASIFRA"),
+                    Opcija = GetString(reader, "OPCIJA"),
+                    KataloskaOznaka = GetString(reader, "KATALOSKAOZNAKA"),
+                    MaloprodajnaJm = GetString(reader, "MALOPRODAJNAJM"),
+                    VeleprodajnaJm = GetString(reader, "VELEPRODAJNAJM"),
+                    NarucivanjeJm = GetString(reader, "NARUCIVANJEJM"),
+                    IzdavanjeJm = GetString(reader, "IZDAVANJEJM"),
+                    TipVarijante = GetString(reader, "TIPVARIJANTE"),
+                    KomitentTip = GetString(reader, "KOMITENTTIP"),
+                    Komitent = GetInt64(reader, "KOMITENT"),
+                    Akciza = GetString(reader, "AKCIZA"),
+                    Taksa = GetString(reader, "TAKSA"),
+                    TarifniStav = GetString(reader, "TARIFNISTAV"),
+                    StampatiBarkod = GetString(reader, "STAMPATIBARKOD"),
+                    Referent = GetString(reader, "REFERENT"),
+                    Serija = GetString(reader, "SERIJA"),
+                    Konsignacija = GetString(reader, "KONSIGNACIJA"),
+                    RokTrajanja = GetString(reader, "ROKTRAJANJA"),
+                    RokTrajanjaDana = GetInt64(reader, "ROKTRAJANJADANA"),
+                    Brend = GetString(reader, "BREND"),
+                    ProizvodjacTip = GetString(reader, "PROIZVODJACTIP"),
+                    Proizvodjac = GetInt64(reader, "PROIZVODJAC"),
+                    ReferentNabavke = GetString(reader, "REFERENTNABAVKE"),
+                    TipZalihe = GetString(reader, "TIPZALIHE"),
+                    Aktivan = GetString(reader, "AKTIVAN"),
+                    Asortiman = GetNullableInt64(reader, "ASORTIMAN"),
+                    Kategorija = GetString(reader, "KATEGORIJA"),
+                    TransportJm = GetString(reader, "TRANSPORTJM"),
+                    OdnosPolica = GetDecimal(reader, "ODNOSPOLICA"),
+                    OdnosPaleta = GetDecimal(reader, "ODNOSPALETA"),
+                    Tezina = GetRequiredDecimal(reader, "TEZINA"),
+                    Zapremina = GetRequiredDecimal(reader, "ZAPREMINA"),
+                    Duzina = GetRequiredDecimal(reader, "DUZINA"),
+                    Sirina = GetRequiredDecimal(reader, "SIRINA"),
+                    Visina = GetRequiredDecimal(reader, "VISINA"),
+                    VisinaPalete = GetDecimal(reader, "VISINAPALETE"),
+                    Drzava = GetString(reader, "DRZAVA"),
+                    Valuta = GetString(reader, "VALUTA"),
+                    RokIsporuke = GetInt32(reader, "ROKISPORUKE"),
+                    SerijaMlp = GetString(reader, "SERIJAMLP"),
+                    RokTrajanjaMlp = GetString(reader, "ROKTRAJANJAMLP"),
+                    EkoloskaNaknada = GetString(reader, "EKOLOSKANAKNADA"),
+                    JedinicnaMpJm = GetString(reader, "JEDINICNAMPJM"),
+                    MlpJmPar = GetString(reader, "MLPJMPAR"),
+                    Opis = GetString(reader, "OPIS")
+                });
+            }
+
+            return result;
+        }
+
+        private static DataTable CreateArtikliOsobineDataTable(List<ArtikalOsobine> artikliOsobine)
+        {
+            var table = new DataTable();
+
+            table.Columns.Add("IDARTIKLA", typeof(decimal));
+            table.Columns.Add("OSNOVNASIFRA", typeof(string));
+            table.Columns.Add("OPCIJA", typeof(string));
+            table.Columns.Add("KATALOSKAOZNAKA", typeof(string));
+            table.Columns.Add("MALOPRODAJNAJM", typeof(string));
+            table.Columns.Add("VELEPRODAJNAJM", typeof(string));
+            table.Columns.Add("NARUCIVANJEJM", typeof(string));
+            table.Columns.Add("IZDAVANJEJM", typeof(string));
+            table.Columns.Add("TIPVARIJANTE", typeof(string));
+            table.Columns.Add("KOMITENTTIP", typeof(string));
+            table.Columns.Add("KOMITENT", typeof(decimal));
+            table.Columns.Add("AKCIZA", typeof(string));
+            table.Columns.Add("TAKSA", typeof(string));
+            table.Columns.Add("TARIFNISTAV", typeof(string));
+            table.Columns.Add("STAMPATIBARKOD", typeof(string));
+            table.Columns.Add("REFERENT", typeof(string));
+            table.Columns.Add("SERIJA", typeof(string));
+            table.Columns.Add("KONSIGNACIJA", typeof(string));
+            table.Columns.Add("ROKTRAJANJA", typeof(string));
+            table.Columns.Add("ROKTRAJANJADANA", typeof(decimal));
+            table.Columns.Add("BREND", typeof(string));
+            table.Columns.Add("PROIZVODJACTIP", typeof(string));
+            table.Columns.Add("PROIZVODJAC", typeof(decimal));
+            table.Columns.Add("REFERENTNABAVKE", typeof(string));
+            table.Columns.Add("TIPZALIHE", typeof(string));
+            table.Columns.Add("AKTIVAN", typeof(string));
+            table.Columns.Add("ASORTIMAN", typeof(decimal));
+            table.Columns.Add("KATEGORIJA", typeof(string));
+            table.Columns.Add("TRANSPORTJM", typeof(string));
+            table.Columns.Add("ODNOSPOLICA", typeof(decimal));
+            table.Columns.Add("ODNOSPALETA", typeof(decimal));
+            table.Columns.Add("TEZINA", typeof(decimal));
+            table.Columns.Add("ZAPREMINA", typeof(decimal));
+            table.Columns.Add("DUZINA", typeof(decimal));
+            table.Columns.Add("SIRINA", typeof(decimal));
+            table.Columns.Add("VISINA", typeof(decimal));
+            table.Columns.Add("VISINAPALETE", typeof(decimal));
+            table.Columns.Add("DRZAVA", typeof(string));
+            table.Columns.Add("VALUTA", typeof(string));
+            table.Columns.Add("ROKISPORUKE", typeof(decimal));
+            table.Columns.Add("SERIJAMLP", typeof(string));
+            table.Columns.Add("ROKTRAJANJAMLP", typeof(string));
+            table.Columns.Add("EKOLOSKANAKNADA", typeof(string));
+            table.Columns.Add("JEDINICNAMPJM", typeof(string));
+            table.Columns.Add("MLPJMPAR", typeof(string));
+            table.Columns.Add("OPIS", typeof(string));
+
+            foreach (var item in artikliOsobine)
+            {
+                table.Rows.Add(
+                    Convert.ToDecimal(item.IdArtikla),
+                    Required(item.OsnovnaSifra, item.IdArtikla, nameof(item.OsnovnaSifra)),
+                    DbValue(item.Opcija),
+                    DbValue(item.KataloskaOznaka),
+                    Required(item.MaloprodajnaJm, item.IdArtikla, nameof(item.MaloprodajnaJm)),
+                    Required(item.VeleprodajnaJm, item.IdArtikla, nameof(item.VeleprodajnaJm)),
+                    Required(item.NarucivanjeJm, item.IdArtikla, nameof(item.NarucivanjeJm)),
+                    Required(item.IzdavanjeJm, item.IdArtikla, nameof(item.IzdavanjeJm)),
+                    Required(item.TipVarijante, item.IdArtikla, nameof(item.TipVarijante)),
+                    Required(item.KomitentTip, item.IdArtikla, nameof(item.KomitentTip)),
+                    Convert.ToDecimal(item.Komitent),
+                    DbValue(item.Akciza),
+                    DbValue(item.Taksa),
+                    DbValue(item.TarifniStav),
+                    Required(item.StampatiBarkod, item.IdArtikla, nameof(item.StampatiBarkod)),
+                    DbValue(item.Referent),
+                    Required(item.Serija, item.IdArtikla, nameof(item.Serija)),
+                    Required(item.Konsignacija, item.IdArtikla, nameof(item.Konsignacija)),
+                    Required(item.RokTrajanja, item.IdArtikla, nameof(item.RokTrajanja)),
+                    Convert.ToDecimal(item.RokTrajanjaDana),
+                    Required(item.Brend, item.IdArtikla, nameof(item.Brend)),
+                    Required(item.ProizvodjacTip, item.IdArtikla, nameof(item.ProizvodjacTip)),
+                    Convert.ToDecimal(item.Proizvodjac),
+                    DbValue(item.ReferentNabavke),
+                    Required(item.TipZalihe, item.IdArtikla, nameof(item.TipZalihe)),
+                    Required(item.Aktivan, item.IdArtikla, nameof(item.Aktivan)),
+                    DbLongAsDecimalValue(item.Asortiman),
+                    Required(item.Kategorija, item.IdArtikla, nameof(item.Kategorija)),
+                    Required(item.TransportJm, item.IdArtikla, nameof(item.TransportJm)),
+                    DbValue(item.OdnosPolica),
+                    DbValue(item.OdnosPaleta),
+                    item.Tezina,
+                    item.Zapremina,
+                    item.Duzina,
+                    item.Sirina,
+                    item.Visina,
+                    DbValue(item.VisinaPalete),
+                    DbValue(item.Drzava),
+                    DbValue(item.Valuta),
+                    DbIntAsDecimalValue(item.RokIsporuke),
+                    Required(item.SerijaMlp, item.IdArtikla, nameof(item.SerijaMlp)),
+                    Required(item.RokTrajanjaMlp, item.IdArtikla, nameof(item.RokTrajanjaMlp)),
+                    DbValue(item.EkoloskaNaknada),
+                    DbValue(item.JedinicnaMpJm),
+                    DbValue(item.MlpJmPar),
+                    DbValue(item.Opis));
+            }
+
+            return table;
+        }
+
+        private static async Task MergeArtikliOsobine(SqlConnection connection, SqlTransaction transaction, CancellationToken token)
+        {
+            await using var command = connection.CreateCommand();
+            command.Transaction = transaction;
+            command.CommandText = "dbo._pr_MergeArtikliOsobine";
+            command.CommandType = CommandType.StoredProcedure;
+            command.CommandTimeout = 120;
+
+            await command.ExecuteNonQueryAsync(token);
+        }
+
+        private async Task TransferArtikliOsobine(int batchSize, CancellationToken token)
+        {
+            long lastId = 0;
+
+            while (!token.IsCancellationRequested)
+            {
+                var artikliOsobine = await ReadArtikliOsobineBatch(lastId, batchSize, token);
+
+                if (artikliOsobine.Count == 0)
+                {
+                    break;
+                }
+
+                await SaveArtikliOsobineToTmpTable(artikliOsobine, token);
+
+                lastId = artikliOsobine[^1].IdArtikla;
+            }
+        }
+
+        private async Task SaveArtikliOsobineToTmpTable(List<ArtikalOsobine> artikliOsobine, CancellationToken token)
+        {
+            await using var connection = new SqlConnection(connectionStrings.Transfer);
+            await connection.OpenAsync(token);
+
+            await using var transaction = await connection.BeginTransactionAsync(token);
+
+            try
+            {
+                await ClearArtikliOsobineTmp(connection, (SqlTransaction)transaction, token);
+                await BulkInsertArtikliOsobineTmp(connection, (SqlTransaction)transaction, artikliOsobine, token);
+                await MergeArtikliOsobine(connection, (SqlTransaction)transaction, token);
+
+                await transaction.CommitAsync(token);
+            }
+            catch
+            {
+                await transaction.RollbackAsync(token);
+                throw;
+            }
+        }
+
+        private async Task BulkInsertArtikliOsobineTmp(SqlConnection connection, SqlTransaction transaction, List<ArtikalOsobine> artikliOsobine, CancellationToken token)
+        {
+            var table = CreateArtikliOsobineDataTable(artikliOsobine);
+
+            using var bulkCopy = new SqlBulkCopy(
+                connection,
+                SqlBulkCopyOptions.CheckConstraints,
+                transaction);
+
+            bulkCopy.DestinationTableName = "dbo._tb_ARTIKLIOSOBINE_TMP";
+            bulkCopy.BatchSize = artikliOsobine.Count;
+            bulkCopy.BulkCopyTimeout = 60;
+
+            foreach (DataColumn column in table.Columns)
+            {
+                bulkCopy.ColumnMappings.Add(column.ColumnName, column.ColumnName);
+            }
+
+            await bulkCopy.WriteToServerAsync(table, token);
+        }
+
+        private async Task ClearArtikliOsobineTmp(SqlConnection connection, SqlTransaction transaction, CancellationToken token)
+        {
+            await using var command = connection.CreateCommand();
+            command.Transaction = transaction;
+            command.CommandText = "TRUNCATE TABLE dbo._tb_ARTIKLIOSOBINE_TMP;";
+
+            await command.ExecuteNonQueryAsync(token);
+        }
+
         private static object DbValue<T>(T? value)
         {
             return value is null ? DBNull.Value : value;
@@ -503,6 +860,30 @@ namespace AswTransferToPantheon.Services.Implementation
             }
 
             return value;
+        }
+
+        private static decimal? GetDecimal(OracleDataReader reader, string columnName)
+        {
+            var ordinal = reader.GetOrdinal(columnName);
+            return reader.IsDBNull(ordinal) ? null : Convert.ToDecimal(reader.GetValue(ordinal));
+        }
+
+        private static decimal GetRequiredDecimal(OracleDataReader reader, string columnName)
+        {
+            var ordinal = reader.GetOrdinal(columnName);
+
+            if (reader.IsDBNull(ordinal))
+            {
+                throw new InvalidOperationException($"Oracle kolona {columnName} je NULL, a obavezna je.");
+            }
+
+            return Convert.ToDecimal(reader.GetValue(ordinal));
+        }
+
+        private static long? GetNullableInt64(OracleDataReader reader, string columnName)
+        {
+            var ordinal = reader.GetOrdinal(columnName);
+            return reader.IsDBNull(ordinal) ? null : Convert.ToInt64(reader.GetValue(ordinal));
         }
     }
 }
