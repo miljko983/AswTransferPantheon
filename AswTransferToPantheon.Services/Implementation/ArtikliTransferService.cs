@@ -7,6 +7,7 @@ using System.Text.Json;
 using Microsoft.Data.SqlClient;
 using System.Data;
 using System.Diagnostics;
+using System.Data.Common;
 
 namespace AswTransferToPantheon.Services.Implementation
 {
@@ -26,6 +27,7 @@ namespace AswTransferToPantheon.Services.Implementation
             await ExecuteWithLogging("Artikli dobavljači",() => TransferArtikliDobavljaci(batchSize, token));
             await ExecuteWithLogging("Artikli osobine",() => TransferArtikliOsobine(batchSize, token));
             await ExecuteWithLogging("Barkodovi", () => TransferBarkodovi(batchSize, token));
+            await ExecuteWithLogging("Robne grupe", () => TransferRobneGrupe(batchSize, token));
 
             // Kasnije redom:
             // await TransferRobneGrupe(batchSize, token);
@@ -33,7 +35,6 @@ namespace AswTransferToPantheon.Services.Implementation
             // await TransferArtikliDobavljaci(batchSize, token);
             // await TransferArtikliOsobine(batchSize, token);
             // await TransferBarkodovi(batchSize, token);
-            // await TransferRobneGrupe(batchSize, token);
         }
 
         
@@ -135,14 +136,33 @@ namespace AswTransferToPantheon.Services.Implementation
             }
         }
 
+        private async Task SaveRobneGrupeToTmpTable(List<RobnaGrupa> robneGrupe, CancellationToken token)
+        {
+            await using var connection = new SqlConnection(connectionStrings.Transfer);
+            await connection.OpenAsync(token);
+
+            await using var transaction = await connection.BeginTransactionAsync(token);
+
+            try
+            {
+                await ClearRobneGrupeTmp(connection, (SqlTransaction)transaction, token);
+                await BulkInsertRobneGrupeTmp(connection, (SqlTransaction)transaction, robneGrupe, token);
+                await MergeRobneGrupe(connection, (SqlTransaction)transaction, token);
+
+                await transaction.CommitAsync(token);
+            }
+            catch
+            {
+                await transaction.RollbackAsync(token);
+                throw;
+            }
+        }
+
         private async Task BulkInsertArtikliDobavljaciTmp(SqlConnection connection, SqlTransaction transaction, List<ArtikalDobavljac> artikliDobavljaci, CancellationToken token)
         {
             var table = CreateArtikliDobavljaciDataTable(artikliDobavljaci);
 
-            using var bulkCopy = new SqlBulkCopy(
-                connection,
-                SqlBulkCopyOptions.CheckConstraints,
-                transaction);
+            using var bulkCopy = new SqlBulkCopy(connection, SqlBulkCopyOptions.CheckConstraints, transaction);
 
             bulkCopy.DestinationTableName = "dbo._tb_ARTIKLIDOBAVLJACI_TMP";
             bulkCopy.BatchSize = artikliDobavljaci.Count;
@@ -198,6 +218,14 @@ namespace AswTransferToPantheon.Services.Implementation
             await command.ExecuteNonQueryAsync(token);
         }
 
+        private static async Task ClearRobneGrupeTmp(SqlConnection connection, SqlTransaction transaction, CancellationToken token)
+        {
+            await using var command = connection.CreateCommand();
+            command.Transaction = transaction;
+            command.CommandText = "TRUNCATE TABLE dbo._tb_ROBNEGRUPE_TMP;";
+
+            await command.ExecuteNonQueryAsync(token);
+        }
         private static async Task MergeArtikli(SqlConnection connection, SqlTransaction transaction, CancellationToken token)
         {
             await using var command = connection.CreateCommand();
@@ -225,6 +253,17 @@ namespace AswTransferToPantheon.Services.Implementation
             await using var command = connection.CreateCommand();
             command.Transaction = transaction;
             command.CommandText = "dbo._pr_MergeBarkodovi";
+            command.CommandType = CommandType.StoredProcedure;
+            command.CommandTimeout = 120;
+
+            await command.ExecuteNonQueryAsync(token);
+        }
+
+        private static async Task MergeRobneGrupe(SqlConnection connection, SqlTransaction transaction, CancellationToken token)
+        {
+            await using var command = connection.CreateCommand();
+            command.Transaction = transaction;
+            command.CommandText = "dbo._pr_MergeRobneGrupe";
             command.CommandType = CommandType.StoredProcedure;
             command.CommandTimeout = 120;
 
@@ -778,18 +817,18 @@ namespace AswTransferToPantheon.Services.Implementation
         private async Task<List<Barkod>> ReadBarkodoviBatch(long lastId, int batchSize, CancellationToken token)
         {
                 const string sql = """
-            SELECT
-                ID,
-                BARKOD,
-                ARTIKAL,
-                VARIJANTA,
-                JEDINICAMERE,
-                REDNIBROJ
-            FROM IIS.BARKODOVI
-            WHERE ID > :lastId
-            ORDER BY ID
-            FETCH NEXT :batchSize ROWS ONLY
-            """;
+                                    SELECT
+                                        ID,
+                                        BARKOD,
+                                        ARTIKAL,
+                                        VARIJANTA,
+                                        JEDINICAMERE,
+                                        REDNIBROJ
+                                    FROM IIS.BARKODOVI
+                                    WHERE ID > :lastId
+                                    ORDER BY ID
+                                    FETCH NEXT :batchSize ROWS ONLY
+                                    """;
 
             var result = new List<Barkod>(batchSize);
 
@@ -821,6 +860,81 @@ namespace AswTransferToPantheon.Services.Implementation
             return result;
         }
 
+        private static async Task BulkInsertRobneGrupeTmp(SqlConnection connection, SqlTransaction transaction, List<RobnaGrupa> robneGrupe, CancellationToken token)
+        {
+            var table = CreateRobneGrupeDataTable(robneGrupe);
+
+            using var bulkCopy = new SqlBulkCopy(
+                connection,
+                SqlBulkCopyOptions.CheckConstraints,
+                transaction);
+
+            bulkCopy.DestinationTableName = "dbo._tb_ROBNEGRUPE_TMP";
+            bulkCopy.BatchSize = robneGrupe.Count;
+            bulkCopy.BulkCopyTimeout = 60;
+
+            bulkCopy.ColumnMappings.Add("SIFRA", "SIFRA");
+            bulkCopy.ColumnMappings.Add("NAZIV", "NAZIV");
+            bulkCopy.ColumnMappings.Add("KONTOZALIHA", "KONTOZALIHA");
+            bulkCopy.ColumnMappings.Add("TIP", "TIP");
+            bulkCopy.ColumnMappings.Add("NADREDJENA", "NADREDJENA");
+            bulkCopy.ColumnMappings.Add("JEDINICAMERE", "JEDINICAMERE");
+            bulkCopy.ColumnMappings.Add("POLIKOD", "POLIKOD");
+            bulkCopy.ColumnMappings.Add("REFERENT", "REFERENT");
+
+            await bulkCopy.WriteToServerAsync(table, token);
+        }
+
+        private static DataTable CreateRobneGrupeDataTable(List<RobnaGrupa> robneGrupe)
+        {
+            var table = new DataTable();
+
+            table.Columns.Add("SIFRA", typeof(string));
+            table.Columns.Add("NAZIV", typeof(string));
+            table.Columns.Add("KONTOZALIHA", typeof(string));
+            table.Columns.Add("TIP", typeof(string));
+            table.Columns.Add("NADREDJENA", typeof(string));
+            table.Columns.Add("JEDINICAMERE", typeof(string));
+            table.Columns.Add("POLIKOD", typeof(string));
+            table.Columns.Add("REFERENT", typeof(string));
+
+            foreach (var item in robneGrupe)
+            {
+                table.Rows.Add(
+                    Required(item.Sifra, 0, nameof(item.Sifra)),
+                    Required(item.Naziv, 0, nameof(item.Naziv)),
+                    DbValue(item.KontoZaliha),
+                    Required(item.Tip, 0, nameof(item.Tip)),
+                    Required(item.Nadredjena, 0, nameof(item.Nadredjena)),
+                    DbValue(item.JedinicaMere),
+                    Required(item.PoliKod, 0, nameof(item.PoliKod)),
+                    DbValue(item.Referent));
+            }
+
+            return table;
+        }
+
+        private async Task TransferRobneGrupe(int batchSize, CancellationToken token)
+        {
+            string? lastSifra = null;
+
+            while (!token.IsCancellationRequested)
+            {
+                var robneGrupe = await ReadRobneGrupeBatch(lastSifra, batchSize, token);
+
+                if (robneGrupe.Count == 0)
+                {
+                    break;
+                }
+
+                await SaveRobneGrupeToTmpTable(robneGrupe, token);
+
+                lastSifra = Required(
+                    robneGrupe[^1].Sifra,
+                    0,
+                    nameof(RobnaGrupa.Sifra));
+            }
+        }
         private static async Task MergeArtikliOsobine(SqlConnection connection, SqlTransaction transaction, CancellationToken token)
         {
             await using var command = connection.CreateCommand();
@@ -938,6 +1052,58 @@ namespace AswTransferToPantheon.Services.Implementation
             }
 
             return table;
+        }
+
+        private async Task<List<RobnaGrupa>> ReadRobneGrupeBatch(string lastSifra, int batchSize, CancellationToken token)
+        {
+            const string sql = """
+                                SELECT
+                                    SIFRA,
+                                    NAZIV,
+                                    KONTOZALIHA,
+                                    TIP,
+                                    NADREDJENA,
+                                    JEDINICAMERE,
+                                    POLIKOD,
+                                    REFERENT
+                                FROM IIS.ROBNEGRUPE
+                                WHERE (:lastSifra IS NULL OR SIFRA > :lastSifra)
+                                ORDER BY SIFRA
+                                FETCH NEXT :batchSize ROWS ONLY
+                                """;
+
+            var result = new List<RobnaGrupa>(batchSize);
+
+            await using var connection = new OracleConnection(BuildOracleConnectionString());
+            await connection.OpenAsync();
+
+            await using var command = connection.CreateCommand();
+            command.CommandText = sql;
+            command.BindByName = true;
+
+            command.Parameters.Add("lastSifra", OracleDbType.Varchar2).Value =
+                lastSifra is null ? DBNull.Value : lastSifra;
+
+            command.Parameters.Add("batchSize", OracleDbType.Int32).Value = batchSize;
+
+            await using var reader = await command.ExecuteReaderAsync(token);
+
+            while (await reader.ReadAsync(token))
+            {
+                result.Add(new RobnaGrupa
+                {
+                    Sifra = GetString(reader, "SIFRA"),
+                    Naziv = GetString(reader, "NAZIV"),
+                    KontoZaliha = GetString(reader, "KONTOZALIHA"),
+                    Tip = GetString(reader, "TIP"),
+                    Nadredjena = GetString(reader, "NADREDJENA"),
+                    JedinicaMere = GetString(reader, "JEDINICAMERE"),
+                    PoliKod = GetString(reader, "POLIKOD"),
+                    Referent = GetString(reader, "REFERENT")
+                });
+            }
+
+            return result;
         }
 
         private async Task ClearBarkodoviTmp(SqlConnection connection, SqlTransaction transaction, CancellationToken token)
