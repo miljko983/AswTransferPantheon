@@ -9,5 +9,6 @@ namespace AswTransferToPantheon.Services.Interfaces
     public interface IKifTransferService
     {
         Task Transfer(int batchSize, CancellationToken token);
+        Action<string>? LogAction { get; set; }
     }
 }

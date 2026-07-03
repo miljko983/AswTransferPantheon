@@ -226,7 +226,9 @@ namespace AswTransferToPantheon.Services.Implementation
 
         private async Task TransferKif(int batchSize)
         {
-            await kifTransferService.Transfer(batchSize, cancellationTokenSource.Token);   //ovde ide logika
+            kifTransferService.LogAction = LogAction;
+
+            await kifTransferService.Transfer(batchSize, cancellationTokenSource.Token);
         }
 
         private async Task TransferArtikli(int batchSize)
