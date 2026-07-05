@@ -7,7 +7,6 @@ using System.Text.Json;
 using Microsoft.Data.SqlClient;
 using System.Data;
 using System.Diagnostics;
-using System.Data.Common;
 
 namespace AswTransferToPantheon.Services.Implementation
 {
@@ -28,16 +27,7 @@ namespace AswTransferToPantheon.Services.Implementation
             await ExecuteWithLogging("Artikli osobine",() => TransferArtikliOsobine(batchSize, token));
             await ExecuteWithLogging("Barkodovi", () => TransferBarkodovi(batchSize, token));
             await ExecuteWithLogging("Robne grupe", () => TransferRobneGrupe(batchSize, token));
-
-            // Kasnije redom:
-            // await TransferRobneGrupe(batchSize, token);
-            // Kasnije redom:
-            // await TransferArtikliDobavljaci(batchSize, token);
-            // await TransferArtikliOsobine(batchSize, token);
-            // await TransferBarkodovi(batchSize, token);
-        }
-
-        
+        }        
 
         private async Task TransferArtikli(int batchSize, CancellationToken token)
         {

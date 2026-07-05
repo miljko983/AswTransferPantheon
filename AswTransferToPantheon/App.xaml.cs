@@ -16,34 +16,31 @@ namespace AswTransferToPantheon
     public partial class App : Application
     {
         private readonly IHost _host;
-
         public App()
         {
-            _host = Host.CreateDefaultBuilder()
-        .ConfigureAppConfiguration((context, configuration) =>
-        {
-            configuration.SetBasePath(AppContext.BaseDirectory);
-            configuration.AddJsonFile(
-                "appsettings.json",
-                optional: false,
-                reloadOnChange: true);
-        })
-        .ConfigureServices((context, services) =>
-        {
-            services.AddSingleton<MainWindow>();
-            services.AddTransient<MainWindowViewModel>();
+            _host = Host.CreateDefaultBuilder().ConfigureAppConfiguration((context, configuration) =>
+            {
+                configuration.SetBasePath(AppContext.BaseDirectory);
+                configuration.AddJsonFile("appsettings.json", optional: false, reloadOnChange: true);
+            })
+            .ConfigureServices((context, services) =>
+            {
+                services.AddSingleton<MainWindow>();
+                services.AddTransient<MainWindowViewModel>();
 
-            services.Configure<ConnectionStrings>(
-                context.Configuration.GetSection(nameof(ConnectionStrings)));
+                services.Configure<ConnectionStrings>(
+                    context.Configuration.GetSection(nameof(ConnectionStrings)));
 
-            services.Configure<SchedulerConfiguration>(
-                context.Configuration.GetSection("Scheduler"));
+                services.Configure<SchedulerConfiguration>(
+                    context.Configuration.GetSection("Scheduler"));
 
-            services.AddSingleton<ITaskSchedulerService, TaskSchedulerService>();
-            services.AddTransient<IKifTransferService, KifTransferService>();
-            services.AddTransient<IArtikliTransferService, ArtikliTransferService>();
-        })
-        .Build();
+                services.AddSingleton<ITaskSchedulerService, TaskSchedulerService>();
+                services.AddTransient<IKifTransferService, KifTransferService>();
+                services.AddTransient<IArtikliTransferService, ArtikliTransferService>();
+                services.AddSingleton<ITransferFileLogger, TransferFileLogger>();
+
+            })
+            .Build();
         }
 
         protected override async void OnStartup(StartupEventArgs e)

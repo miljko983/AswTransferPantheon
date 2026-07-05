@@ -15,7 +15,7 @@ namespace AswTransferToPantheon.Services.Implementation
         private Dictionary<string, DateTime> executionTimes = null!;
         private readonly CancellationTokenSource cancellationTokenSource = new CancellationTokenSource();
         private readonly IArtikliTransferService artikliTransferService;
-
+        private readonly ITransferFileLogger transferFileLogger;
         public Action<string> LogAction { get; set; }
 
         public Action<Exception, string> LogErrorAction { get; set; }
@@ -27,6 +27,7 @@ namespace AswTransferToPantheon.Services.Implementation
             this.schedulerConfiguration = schedulerConfiguration;
             this.kifTransferService = kifTransferService;
             this.artikliTransferService = artikliTransferService;
+            this.transferFileLogger = transferFileLogger;
         }
 
         public Task ScheduleTasks()
@@ -54,7 +55,10 @@ namespace AswTransferToPantheon.Services.Implementation
                 return;
             }
 
+            var groupName = Path.Combine("PeriodicTasks", pt.Name);
+
             DateTime nextTime;
+
             if (firstCall && pt.ExecuteOnStartup)
             {
                 nextTime = DateTime.Now;
@@ -76,10 +80,11 @@ namespace AswTransferToPantheon.Services.Implementation
             catch (OperationCanceledException)
             {
                 // execution is cancelled, just stop.
+                transferFileLogger.Info(groupName, "Scheduler", $"Periodic task {pt.Name} cancelled.");
             }
             catch (Exception exc)
             {
-                LogErrorAction?.Invoke(exc, $"Error executing periodic task {pt.Name}.");
+                LogError(groupName, "Scheduler", $"Error executing periodic task {pt.Name}.", exc);
             }
             finally
             {
@@ -89,9 +94,11 @@ namespace AswTransferToPantheon.Services.Implementation
 
         private async Task ExecuteTasks(PeriodicTask pt)
         {
+            var groupName = Path.Combine("PeriodicTasks", pt.Name);
+
             foreach (var task in pt.Tasks)
             {
-                await GetTask(task, pt.BatchSize);
+                await GetTask(task, pt.BatchSize, groupName);
             }
         }
 
@@ -128,17 +135,7 @@ namespace AswTransferToPantheon.Services.Implementation
         }
 
         private Task ScheduleDailyTask(DailyTask dtc, bool firstTime)
-        {
-            /*  DateTime lastExecution;
-              executionTimes.TryGetValue(dtc.Name, out lastExecution);
-              var nextTime = GetDailyStartTime(dtc.Start);
-              if (firstTime && lastExecution.Date != DateTime.Now.Date && nextTime <= DateTime.Now)
-              {
-                  nextTime = DateTime.Now;
-              }
-
-              _ = ScheduleNextDaily(dtc, nextTime);
-              return Task.CompletedTask;*/
+        {            
             DateTime lastExecution;
             executionTimes.TryGetValue(dtc.Name, out lastExecution);
 
@@ -165,10 +162,18 @@ namespace AswTransferToPantheon.Services.Implementation
                 return;
             }
 
+            var groupName = Path.Combine("DailyTasks", dtc.Name);
+
             try
             {
                 var difference = nextTime.Subtract(DateTime.Now);
+
+                transferFileLogger.Info(groupName, "Scheduler", $"Scheduled daily task {dtc.Name} for {nextTime}.");
+
                 await Task.Delay(difference, cancellationTokenSource.Token);
+
+                transferFileLogger.Info(groupName, "Scheduler", $"Executing daily task {dtc.Name}.");
+
                 await ExecuteTasks(dtc, dtc.BatchSize);
 
                 lock (TaskLock)
@@ -177,24 +182,37 @@ namespace AswTransferToPantheon.Services.Implementation
                     SaveExecutionTimes();
                 }
 
-                _ = ScheduleDailyTask(dtc, false);
+                transferFileLogger.Info(groupName, "Scheduler", $"Executed daily task {dtc.Name}.");
             }
             catch (OperationCanceledException)
             {
-                // execution is cancelled, just stop.
+                transferFileLogger.Info(groupName, "Scheduler", $"Daily task {dtc.Name} cancelled.");
+            }
+            catch (Exception exception)
+            {
+                LogError(groupName, "Scheduler", $"Error executing daily task {dtc.Name}.", exception);
+            }
+            finally
+            {
+                if (!cancellationTokenSource.IsCancellationRequested)
+                {
+                    _ = ScheduleDailyTask(dtc, false);
+                }
             }
         }
 
         private async Task ExecuteTasks(DailyTask dailyTask, int batchSize)
         {
+            var groupName = Path.Combine("DailyTasks", dailyTask.Name);
+
             foreach (var task in dailyTask.Tasks)
             {
-                await GetTask(task, batchSize);
+                await GetTask(task, batchSize, groupName);
             }
 
             foreach (var task in dailyTask.ParallelTasks)
             {
-                await GetTask(task, batchSize);
+                await GetTask(task, batchSize, groupName);
             }
         }
 
@@ -210,32 +228,59 @@ namespace AswTransferToPantheon.Services.Implementation
             return nextTime;
         }
 
-        private Task GetTask(TaskType type, int batchSize)
+        private Task GetTask(TaskType type, int batchSize, string groupName)
         {
             switch (type)
             {
                 case TaskType.Artikli:
-                    return TransferArtikli(batchSize);
+                    return TransferArtikli(batchSize, groupName, nameof(TaskType.Artikli));
+
                 case TaskType.Kif:
-                    return TransferKif(batchSize);
-                    // za svaki type
+                    return TransferKif(batchSize, groupName, nameof(TaskType.Kif));
+
                 default:
                     return Task.CompletedTask;
             }
         }
 
-        private async Task TransferKif(int batchSize)
+        private async Task TransferKif(int batchSize, string groupName, string taskName)
         {
-            kifTransferService.LogAction = LogAction;
+            kifTransferService.LogAction = CreateLogAction(groupName, taskName);
 
-            await kifTransferService.Transfer(batchSize, cancellationTokenSource.Token);
+            try
+            {
+                transferFileLogger.Info(groupName, taskName, $"START {taskName}. BatchSize: {batchSize}");
+
+                await kifTransferService.Transfer(
+                    batchSize,
+                    cancellationTokenSource.Token);
+
+                transferFileLogger.Info(groupName, taskName, $"END {taskName}.");
+            }
+            catch (Exception exception)
+            {
+                LogError(groupName, taskName, $"Greška u tasku {taskName}.", exception);
+                throw;
+            }
         }
 
-        private async Task TransferArtikli(int batchSize)
+        private async Task TransferArtikli(int batchSize, string groupName, string taskName)
         {
-            artikliTransferService.LogAction = LogAction;
+            artikliTransferService.LogAction = CreateLogAction(groupName, taskName);
 
-            await artikliTransferService.TransferArtikliPaket(batchSize, cancellationTokenSource.Token);
+            try
+            {
+                transferFileLogger.Info(groupName, taskName, $"START {taskName}. BatchSize: {batchSize}");
+
+                await artikliTransferService.TransferArtikliPaket(batchSize, cancellationTokenSource.Token);
+
+                transferFileLogger.Info(groupName, taskName, $"END {taskName}.");
+            }
+            catch (Exception exception)
+            {
+                LogError(groupName, taskName, $"Greška u tasku {taskName}.", exception);
+                throw;
+            }
         }
 
         private void SaveExecutionTimes()
@@ -274,6 +319,21 @@ namespace AswTransferToPantheon.Services.Implementation
         public void CancelTasks()
         {
             cancellationTokenSource.Cancel();
-        }               
+        }
+
+        private Action<string> CreateLogAction(string groupName, string taskName)
+        {
+            return message =>
+            {
+                LogAction?.Invoke(message);
+                transferFileLogger.Info(groupName, taskName, message);
+            };
+        }
+
+        private void LogError(string groupName, string taskName, string message, Exception exception)
+        {
+            LogErrorAction?.Invoke(exception, message);
+            transferFileLogger.Error(groupName, taskName, message, exception);
+        }
     }
 }
