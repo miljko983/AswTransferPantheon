@@ -10,5 +10,7 @@ namespace AswTransferToPantheon.Services.Interfaces
     {
         Action<string> LogAction { get; set; }
         Task TransferArtikliPaket(int batchSize, CancellationToken token);
+
+        Action<string, string, string, string, Exception>? BadRecordAction { get; set; }
     }
 }

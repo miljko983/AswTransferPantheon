@@ -15,6 +15,8 @@ namespace AswTransferToPantheon.Services.Implementation
         private readonly ConnectionStrings connectionStrings;
 
         public Action<string> LogAction { get; set; }
+        public Action<string, string, string, string, Exception>? BadRecordAction { get; set; }
+
         public ArtikliTransferService(IOptions<ConnectionStrings> connectionStrings)
         {
             this.connectionStrings = connectionStrings.Value;
@@ -42,23 +44,47 @@ namespace AswTransferToPantheon.Services.Implementation
                     break;
                 }
 
-                await SaveArtikliToTmpTable(artikli, token);
+                //await SaveArtikliToTmpTable(artikli, token);
+                await SaveArtikliBatchWithFallback(artikli, token);
 
                 lastId = artikli[^1].Id;
             }
-            /*    
-               long lastId = 0;
+            
+        }
 
-               var artikli = await ReadArtikliBatch(lastId, batchSize, token);
+        private async Task SaveArtikliBatchWithFallback(List<Artikal> artikli, CancellationToken token)
+        {
+            try
+            {
+                await SaveArtikliToTmpTable(artikli, token);
+            }
+            catch (Exception batchException)
+            {
+                LogAction?.Invoke(
+                    $"ARTIKLI batch od {artikli.Count} redova je pukao: {batchException.Message}. Pokušavam red po red...");
 
-               if (artikli.Count == 0)
-               {
-                   return;
-               }
+                foreach (var artikal in artikli)
+                {
+                    if (token.IsCancellationRequested)
+                    {
+                        return;
+                    }
 
-               await SaveArtikliToTmpTable(artikli, token);
-               */
-            //await SaveArtikliToTestFile(artikli, token);
+                    try
+                    {
+                        await SaveArtikliToTmpTable([artikal], token);
+                    }
+                    catch (Exception rowException)
+                    {
+                        BadRecordAction?.Invoke(
+                            "ARTIKLI",
+                            $"ID={artikal.Id}; SIFRA={artikal.Sifra}",
+                            JsonSerializer.Serialize(artikal),
+                            "Greška pri upisu jednog artikla.",
+                            rowException);
+                    }
+                }
+            }
         }
 
         private async Task TransferArtikliDobavljaci(int batchSize, CancellationToken token)
@@ -74,7 +100,7 @@ namespace AswTransferToPantheon.Services.Implementation
                     break;
                 }
 
-                await SaveArtikliDobavljaciToTmpTable(artikliDobavljaci, token);
+                await SaveArtikliDobavljaciBatchWithFallback(artikliDobavljaci, token);
 
                 lastId = artikliDobavljaci[^1].Id;
             }
@@ -904,27 +930,7 @@ namespace AswTransferToPantheon.Services.Implementation
             return table;
         }
 
-        private async Task TransferRobneGrupe(int batchSize, CancellationToken token)
-        {
-            string? lastSifra = null;
-
-            while (!token.IsCancellationRequested)
-            {
-                var robneGrupe = await ReadRobneGrupeBatch(lastSifra, batchSize, token);
-
-                if (robneGrupe.Count == 0)
-                {
-                    break;
-                }
-
-                await SaveRobneGrupeToTmpTable(robneGrupe, token);
-
-                lastSifra = Required(
-                    robneGrupe[^1].Sifra,
-                    0,
-                    nameof(RobnaGrupa.Sifra));
-            }
-        }
+        
         private static async Task MergeArtikliOsobine(SqlConnection connection, SqlTransaction transaction, CancellationToken token)
         {
             await using var command = connection.CreateCommand();
@@ -949,7 +955,7 @@ namespace AswTransferToPantheon.Services.Implementation
                     break;
                 }
 
-                await SaveArtikliOsobineToTmpTable(artikliOsobine, token);
+                await SaveArtikliOsobineBatchWithFallback(artikliOsobine, token);
 
                 lastId = artikliOsobine[^1].IdArtikla;
             }
@@ -968,9 +974,171 @@ namespace AswTransferToPantheon.Services.Implementation
                     break;
                 }
 
-                await SaveBarkodoviToTmpTable(barkodovi, token);
+                await SaveBarkodoviBatchWithFallback(barkodovi, token);
 
                 lastId = barkodovi[^1].Id;
+            }
+        }
+
+        private async Task TransferRobneGrupe(int batchSize, CancellationToken token)
+        {
+            string? lastSifra = null;
+
+            while (!token.IsCancellationRequested)
+            {
+                var robneGrupe = await ReadRobneGrupeBatch(lastSifra, batchSize, token);
+
+                if (robneGrupe.Count == 0)
+                {
+                    break;
+                }
+
+                await SaveRobneGrupeBatchWithFallback(robneGrupe, token);
+
+                lastSifra = Required(
+                    robneGrupe[^1].Sifra,
+                    0,
+                    nameof(RobnaGrupa.Sifra));
+            }
+        }
+
+        private async Task SaveArtikliDobavljaciBatchWithFallback(List<ArtikalDobavljac> artikliDobavljaci, CancellationToken token)
+        {
+            try
+            {
+                await SaveArtikliDobavljaciToTmpTable(artikliDobavljaci, token);
+            }
+            catch (Exception batchException)
+            {
+                LogAction?.Invoke(
+                    $"ARTIKLIDOBAVLJACI batch od {artikliDobavljaci.Count} redova je pukao: {batchException.Message}. Pokušavam red po red...");
+
+                foreach (var item in artikliDobavljaci)
+                {
+                    if (token.IsCancellationRequested)
+                    {
+                        return;
+                    }
+
+                    try
+                    {
+                        await SaveArtikliDobavljaciToTmpTable([item], token);
+                    }
+                    catch (Exception rowException)
+                    {
+                        BadRecordAction?.Invoke(
+                            "ARTIKLIDOBAVLJACI",
+                            $"ID={item.Id}; IDARTIKLA={item.IdArtikla}",
+                            JsonSerializer.Serialize(item),
+                            "Greška pri upisu jednog reda ARTIKLIDOBAVLJACI.",
+                            rowException);
+                    }
+                }
+            }
+        }
+
+        private async Task SaveArtikliOsobineBatchWithFallback(List<ArtikalOsobine> artikliOsobine, CancellationToken token)
+        {
+            try
+            {
+                await SaveArtikliOsobineToTmpTable(artikliOsobine, token);
+            }
+            catch (Exception batchException)
+            {
+                LogAction?.Invoke(
+                    $"ARTIKLIOSOBINE batch od {artikliOsobine.Count} redova je pukao: {batchException.Message}. Pokušavam red po red...");
+
+                foreach (var item in artikliOsobine)
+                {
+                    if (token.IsCancellationRequested)
+                    {
+                        return;
+                    }
+
+                    try
+                    {
+                        await SaveArtikliOsobineToTmpTable([item], token);
+                    }
+                    catch (Exception rowException)
+                    {
+                        BadRecordAction?.Invoke(
+                            "ARTIKLIOSOBINE",
+                            $"IDARTIKLA={item.IdArtikla}; OSNOVNASIFRA={item.OsnovnaSifra}",
+                            JsonSerializer.Serialize(item),
+                            "Greška pri upisu jednog reda ARTIKLIOSOBINE.",
+                            rowException);
+                    }
+                }
+            }
+        }
+
+        private async Task SaveBarkodoviBatchWithFallback(List<Barkod> barkodovi, CancellationToken token)
+        {
+            try
+            {
+                await SaveBarkodoviToTmpTable(barkodovi, token);
+            }
+            catch (Exception batchException)
+            {
+                LogAction?.Invoke(
+                    $"BARKODOVI batch od {barkodovi.Count} redova je pukao: {batchException.Message}. Pokušavam red po red...");
+
+                foreach (var item in barkodovi)
+                {
+                    if (token.IsCancellationRequested)
+                    {
+                        return;
+                    }
+
+                    try
+                    {
+                        await SaveBarkodoviToTmpTable([item], token);
+                    }
+                    catch (Exception rowException)
+                    {
+                        BadRecordAction?.Invoke(
+                            "BARKODOVI",
+                            $"ID={item.Id}; IDARTIKLA={item.IdArtikla}; BARKOD={item.BarkodVrednost}",
+                            JsonSerializer.Serialize(item),
+                            "Greška pri upisu jednog reda BARKODOVI.",
+                            rowException);
+                    }
+                }
+            }
+        }
+
+        private async Task SaveRobneGrupeBatchWithFallback(List<RobnaGrupa> robneGrupe, CancellationToken token)
+        {
+            try
+            {
+                await SaveRobneGrupeToTmpTable(robneGrupe, token);
+            }
+            catch (Exception batchException)
+            {
+                LogAction?.Invoke(
+                    $"ROBNEGRUPE batch od {robneGrupe.Count} redova je pukao: {batchException.Message}. Pokušavam red po red...");
+
+                foreach (var item in robneGrupe)
+                {
+                    if (token.IsCancellationRequested)
+                    {
+                        return;
+                    }
+
+                    try
+                    {
+                        await SaveRobneGrupeToTmpTable([item], token);
+                    }
+                    catch (Exception rowException)
+                    {
+                        BadRecordAction?.Invoke(
+                            "ROBNEGRUPE",
+                            $"SIFRA={item.Sifra}",
+                            JsonSerializer.Serialize(item),
+                            "Greška pri upisu jednog reda ROBNEGRUPE.",
+                            rowException);
+                    }
+                }
             }
         }
 

@@ -247,6 +247,8 @@ namespace AswTransferToPantheon.Services.Implementation
         {
             kifTransferService.LogAction = CreateLogAction(groupName, taskName);
 
+            kifTransferService.BadRecordAction = (table, key, data, message, ex) => transferFileLogger.BadRecord(groupName, taskName, table, key, data, ex);
+
             try
             {
                 transferFileLogger.Info(groupName, taskName, $"START {taskName}. BatchSize: {batchSize}");
@@ -267,7 +269,9 @@ namespace AswTransferToPantheon.Services.Implementation
         private async Task TransferArtikli(int batchSize, string groupName, string taskName)
         {
             artikliTransferService.LogAction = CreateLogAction(groupName, taskName);
-
+            
+            artikliTransferService.BadRecordAction = (table, key, data, message, ex) => transferFileLogger.BadRecord(groupName, taskName, table, key, data, ex);
+            
             try
             {
                 transferFileLogger.Info(groupName, taskName, $"START {taskName}. BatchSize: {batchSize}");

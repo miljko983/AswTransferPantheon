@@ -12,6 +12,7 @@ namespace AswTransferToPantheon.Services.Implementation
     {
         private readonly ConnectionStrings connectionStrings;
         public Action<string>? LogAction { get; set; }
+        public Action<string, string, string, string, Exception>? BadRecordAction { get; set; }
         public KifTransferService(IOptions<ConnectionStrings> connectionStrings)
         {
             this.connectionStrings = connectionStrings.Value;
