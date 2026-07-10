@@ -7,6 +7,7 @@ using System.Text.Json;
 using Microsoft.Data.SqlClient;
 using System.Data;
 using System.Diagnostics;
+using AswTransferToPantheon.Services.Helpers;
 
 namespace AswTransferToPantheon.Services.Implementation
 {
@@ -60,6 +61,10 @@ namespace AswTransferToPantheon.Services.Implementation
             }
             catch (Exception batchException)
             {
+                if (TransferErrorHelper.IsCriticalError(batchException))
+                {
+                    throw;
+                }
                 LogAction?.Invoke(
                     $"ARTIKLI batch od {artikli.Count} redova je pukao: {batchException.Message}. Pokušavam red po red...");
 
@@ -511,11 +516,19 @@ namespace AswTransferToPantheon.Services.Implementation
 
         private string BuildOracleConnectionString()
         {
-            var builder = new OracleConnectionStringBuilder
+            /*var builder = new OracleConnectionStringBuilder
             {
                 UserID = "panta",
                 Password = connectionStrings.AswPassword,
                 DataSource = "(DESCRIPTION =(ADDRESS_LIST =(ADDRESS = (PROTOCOL = TCP)(HOST = 10.164.3.17)(PORT = 1521)))(CONNECT_DATA =(SID = log)))"
+            };
+
+            return builder.ConnectionString;*/
+            var builder = new OracleConnectionStringBuilder
+            {
+                UserID = connectionStrings.AswUser,
+                Password = connectionStrings.AswPassword,
+                DataSource = connectionStrings.AswDataSource
             };
 
             return builder.ConnectionString;
@@ -1010,6 +1023,11 @@ namespace AswTransferToPantheon.Services.Implementation
             }
             catch (Exception batchException)
             {
+                if (TransferErrorHelper.IsCriticalError(batchException))
+                {
+                    throw;
+                }
+
                 LogAction?.Invoke(
                     $"ARTIKLIDOBAVLJACI batch od {artikliDobavljaci.Count} redova je pukao: {batchException.Message}. Pokušavam red po red...");
 
@@ -1045,6 +1063,10 @@ namespace AswTransferToPantheon.Services.Implementation
             }
             catch (Exception batchException)
             {
+                if (TransferErrorHelper.IsCriticalError(batchException))
+                {
+                    throw;
+                }
                 LogAction?.Invoke(
                     $"ARTIKLIOSOBINE batch od {artikliOsobine.Count} redova je pukao: {batchException.Message}. Pokušavam red po red...");
 
@@ -1080,6 +1102,10 @@ namespace AswTransferToPantheon.Services.Implementation
             }
             catch (Exception batchException)
             {
+                if (TransferErrorHelper.IsCriticalError(batchException))
+                {
+                    throw;
+                }
                 LogAction?.Invoke(
                     $"BARKODOVI batch od {barkodovi.Count} redova je pukao: {batchException.Message}. Pokušavam red po red...");
 
@@ -1115,6 +1141,10 @@ namespace AswTransferToPantheon.Services.Implementation
             }
             catch (Exception batchException)
             {
+                if (TransferErrorHelper.IsCriticalError(batchException))
+                {
+                    throw;
+                }
                 LogAction?.Invoke(
                     $"ROBNEGRUPE batch od {robneGrupe.Count} redova je pukao: {batchException.Message}. Pokušavam red po red...");
 

@@ -27,18 +27,17 @@ namespace AswTransferToPantheon
             {
                 services.AddSingleton<MainWindow>();
                 services.AddTransient<MainWindowViewModel>();
-
-                services.Configure<ConnectionStrings>(
-                    context.Configuration.GetSection(nameof(ConnectionStrings)));
-
-                services.Configure<SchedulerConfiguration>(
-                    context.Configuration.GetSection("Scheduler"));
-
-                services.AddSingleton<ITaskSchedulerService, TaskSchedulerService>();
+                
+                services.Configure<ConnectionStrings>(context.Configuration.GetSection(nameof(ConnectionStrings)));
+                services.Configure<SchedulerConfiguration>(context.Configuration.GetSection("Scheduler"));
+                services.Configure<LoggingConfiguration>(context.Configuration.GetSection("Logging"));
+                services.Configure<EmailConfiguration>(context.Configuration.GetSection("Email"));
+                
                 services.AddTransient<IKifTransferService, KifTransferService>();
                 services.AddTransient<IArtikliTransferService, ArtikliTransferService>();
                 services.AddSingleton<ITransferFileLogger, TransferFileLogger>();
-
+                services.AddSingleton<IEmailNotificationService, EmailNotificationService>();
+                services.AddSingleton<ITaskSchedulerService, TaskSchedulerService>();
             })
             .Build();
         }
@@ -46,6 +45,20 @@ namespace AswTransferToPantheon
         protected override async void OnStartup(StartupEventArgs e)
         {
             await _host.StartAsync();
+
+            try
+            {
+                var emailService = _host.Services.GetRequiredService<IEmailNotificationService>();
+                await emailService.SendTestEmail(CancellationToken.None);
+            }
+            catch (Exception exception)
+            {
+                MessageBox.Show(
+                    exception.Message,
+                    "Greška pri slanju test maila",
+                    MessageBoxButton.OK,
+                    MessageBoxImage.Warning);
+            }
 
             var mainWindow = _host.Services.GetRequiredService<MainWindow>();
             mainWindow.Show();

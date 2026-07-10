@@ -1,27 +1,88 @@
-﻿using System.Text;
+﻿using AswTransferToPantheon.Infrastructure.Configuration;
 using AswTransferToPantheon.Services.Interfaces;
+using Microsoft.Extensions.Options;
+using System.Text;
 
 namespace AswTransferToPantheon.Services.Implementation;
 
 public sealed class TransferFileLogger : ITransferFileLogger
 {
     private static readonly object FileLock = new();
-    private readonly string rootPath;
 
-    public TransferFileLogger()
+    private readonly LoggingConfiguration configuration;
+
+    public TransferFileLogger(IOptions<LoggingConfiguration> configuration)
     {
-        rootPath = @"D:\TransferLog";
+        this.configuration = configuration.Value;
     }
 
     public void Info(string groupName, string taskName, string message)
     {
+        if (!configuration.EnableFileLog)
+        {
+            return;
+        }
+
         Write(groupName, taskName, "INFO", message, null);
     }
 
     public void Error(string groupName, string taskName, string message, Exception exception)
     {
+        if (!configuration.EnableFileLog)
+        {
+            return;
+        }
+
         Write(groupName, taskName, "ERROR", message, exception);
         Write("Errors", "AllErrors", "ERROR", $"{groupName}/{taskName}: {message}", exception);
+    }
+
+    public void BadRecord(
+        string groupName,
+        string taskName,
+        string tableName,
+        string key,
+        string data,
+        Exception exception)
+    {
+        if (!configuration.EnableBadRecordLog)
+        {
+            return;
+        }
+
+        try
+        {
+            var safeTableName = SanitizePathPart(tableName);
+            var date = DateTime.Now.ToString("yyyy-MM-dd");
+
+            var directory = Path.Combine(configuration.RootPath, "BadRecords", safeTableName);
+            Directory.CreateDirectory(directory);
+
+            var filePath = Path.Combine(directory, $"{date}.log");
+
+            var builder = new StringBuilder();
+
+            builder.AppendLine("--------------------------------------------------");
+            builder.AppendLine($"Time: {DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}");
+            builder.AppendLine($"Group: {groupName}");
+            builder.AppendLine($"Task: {taskName}");
+            builder.AppendLine($"Table: {tableName}");
+            builder.AppendLine($"Key: {key}");
+            builder.AppendLine($"Error: {exception.Message}");
+            builder.AppendLine("Data:");
+            builder.AppendLine(data);
+            builder.AppendLine("Exception:");
+            builder.AppendLine(exception.ToString());
+
+            lock (FileLock)
+            {
+                File.AppendAllText(filePath, builder.ToString(), Encoding.UTF8);
+            }
+        }
+        catch
+        {
+            // Logger ne sme da sruši transfer.
+        }
     }
 
     private void Write(string groupName, string taskName, string level, string message, Exception? exception)
@@ -32,7 +93,7 @@ public sealed class TransferFileLogger : ITransferFileLogger
             var safeTaskName = SanitizePathPart(taskName);
 
             var date = DateTime.Now.ToString("yyyy-MM-dd");
-            var directory = Path.Combine(rootPath, safeGroupName, safeTaskName);
+            var directory = Path.Combine(configuration.RootPath, safeGroupName, safeTaskName);
 
             Directory.CreateDirectory(directory);
 
@@ -72,42 +133,5 @@ public sealed class TransferFileLogger : ITransferFileLogger
         }
 
         return value;
-    }
-
-    public void BadRecord(string groupName, string taskName, string tableName, string key, string data, Exception exception)
-    {
-        try
-        {
-            var safeTableName = SanitizePathPart(tableName);
-            var date = DateTime.Now.ToString("yyyy-MM-dd");
-
-            var directory = Path.Combine(rootPath, "BadRecords", safeTableName);
-            Directory.CreateDirectory(directory);
-
-            var filePath = Path.Combine(directory, $"{date}.log");
-
-            var builder = new StringBuilder();
-
-            builder.AppendLine("--------------------------------------------------");
-            builder.AppendLine($"Time: {DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}");
-            builder.AppendLine($"Group: {groupName}");
-            builder.AppendLine($"Task: {taskName}");
-            builder.AppendLine($"Table: {tableName}");
-            builder.AppendLine($"Key: {key}");
-            builder.AppendLine($"Error: {exception.Message}");
-            builder.AppendLine("Data:");
-            builder.AppendLine(data);
-            builder.AppendLine("Exception:");
-            builder.AppendLine(exception.ToString());
-
-            lock (FileLock)
-            {
-                File.AppendAllText(filePath, builder.ToString(), Encoding.UTF8);
-            }
-        }
-        catch
-        {
-            // Logger ne sme da sruši transfer.
-        }
     }
 }

@@ -60,65 +60,25 @@ namespace AswTransferToPantheon.Services.Implementation
                 var kifStavke = await ReadKifStavke(kifIds, token);
                 var kifDatumValute = await ReadKifDatumValute(kifIds, token);
                 var kifKomentari = await ReadKifKomentari(kifIds, token);
+                var vlpZaglavlja = await ReadVlpZaglavlja(kifIds, token);
 
-                await InsertKifPackage(noviKifovi, kifStavke, kifDatumValute, kifKomentari, token);
+                await InsertKifPackage(noviKifovi, kifStavke, kifDatumValute, kifKomentari, vlpZaglavlja, token);
 
                 totalKif += noviKifovi.Count;
                 totalStavke += kifStavke.Count;
 
                 LogAction?.Invoke(
-                    $"KIF paket {batchNumber}: ubačeno {noviKifovi.Count} KIF, {kifStavke.Count} stavki, {kifDatumValute.Count} datum valute, {kifKomentari.Count} komentara.");
-
+                   $"KIF paket {batchNumber}: ubačeno {noviKifovi.Count} KIF, {kifStavke.Count} stavki, {kifDatumValute.Count} datum valute, {kifKomentari.Count} komentara, {vlpZaglavlja.Count} VLP zaglavlja.");
             }
 
-            await TransferVlpZaglavlja(batchSize, token);
-
+            
             LogAction?.Invoke(
                 $"KIF završen. Ukupno ubačeno: {totalKif} KIF, {totalStavke} stavki.");
         }
 
-        private async Task TransferVlpZaglavlja(int batchSize, CancellationToken token)
-        {
-            long lastId = 0;
-            var total = 0;
-            var batchNumber = 0;
-            var godina = DateTime.Now.Year;
+        
 
-            LogAction?.Invoke("VLP zaglavlja - početak prenosa...");
-
-            while (!token.IsCancellationRequested)
-            {
-                batchNumber++;
-
-                var vlpZaglavlja = await ReadVlpZaglavljaBatch(lastId, batchSize, godina, token);
-
-                if (vlpZaglavlja.Count == 0)
-                {
-                    break;
-                }
-
-                lastId = vlpZaglavlja.Max(x => x.Id);
-
-                var novaVlpZaglavlja = await FilterExistingVlpZaglavlja(vlpZaglavlja, token);
-
-                if (novaVlpZaglavlja.Count == 0)
-                {
-                    LogAction?.Invoke($"VLP zaglavlja paket {batchNumber}: nema novih zapisa.");
-                    continue;
-                }
-
-                await BulkInsertVlpZaglavlja(novaVlpZaglavlja, token);
-
-                total += novaVlpZaglavlja.Count;
-
-                LogAction?.Invoke(
-                    $"VLP zaglavlja paket {batchNumber}: ubačeno {novaVlpZaglavlja.Count}. Ukupno: {total}.");
-            }
-
-            LogAction?.Invoke($"VLP zaglavlja završena. Ukupno ubačeno: {total}.");
-        }
-
-        private async Task BulkInsertVlpZaglavlja(List<VlpZaglavlje> vlpZaglavlja, CancellationToken token)
+        private async Task BulkInsertVlpZaglavlja(SqlConnection connection, SqlTransaction transaction, List<VlpZaglavlje> vlpZaglavlja, CancellationToken token)
         {
             if (vlpZaglavlja.Count == 0)
             {
@@ -127,10 +87,10 @@ namespace AswTransferToPantheon.Services.Implementation
 
             var table = CreateVlpZaglavljaDataTable(vlpZaglavlja);
 
-            await using var connection = new SqlConnection(connectionStrings.Transfer);
-            await connection.OpenAsync(token);
-
-            using var bulkCopy = new SqlBulkCopy(connection, SqlBulkCopyOptions.CheckConstraints, null);
+            using var bulkCopy = new SqlBulkCopy(
+                connection,
+                SqlBulkCopyOptions.CheckConstraints,
+                transaction);
 
             bulkCopy.DestinationTableName = "dbo.VLPZAGLAVLJA";
             bulkCopy.BatchSize = vlpZaglavlja.Count;
@@ -261,73 +221,79 @@ namespace AswTransferToPantheon.Services.Implementation
             return table;
         }
 
-        
 
-        private async Task<List<VlpZaglavlje>> ReadVlpZaglavljaBatch(long lastId, int batchSize, int godina, CancellationToken token)
+
+        private async Task<List<VlpZaglavlje>> ReadVlpZaglavlja(List<long> kifIds, CancellationToken token)
         {
-            const string sql = """
-                            SELECT
-                                ID,
-                                ORGJED,
-                                DOKUMENT,
-                                GODINA,
-                                BROJ,
-                                STORNO,
-                                SKLADISTE,
-                                KOMITENTTIP,
-                                KOMITENT,
-                                DATUM,
-                                VREME,
-                                VREMEKREIRANJA,
-                                DATUMVALUTE,
-                                DATUMDPO,
-                                EKSTERNIBROJ,
-                                POREZ,
-                                KORISNIK,
-                                KOMENTAR,
-                                RABAT,
-                                VLPZAGLAVLJE,
-                                KIF,
-                                NALOG,
-                                POTVRDJEN,
-                                POTVRDIO,
-                                VREMEPOTVRDE,
-                                BROJIZJAVE,
-                                DATUMIZJAVE,
-                                TIPDOBAVLJACA,
-                                TIPKUPCA,
-                                ZAVRSEN,
-                                PRODAVAC,
-                                PRODAJNACENA,
-                                KOMISIONAR,
-                                TAKSA,
-                                VALUTA,
-                                KURS,
-                                NADREDJENITIP,
-                                NADREDJENIKOMITENT,
-                                ARTIKAL,
-                                DODATNITROSAK,
-                                POREZNATROSAK,
-                                AVANSBROJ,
-                                AVANSIZNOS,
-                                PORESKAKLAUZULA,
-                                NACINISPORUKE,
-                                CENEZAKALKULACIJU,
-                                BROJPAKETA,
-                                DATUMRACUNA,
-                                BROJRACUNA,
-                                STORNIRAN,
-                                VLPRAZLOGPOVRATA,
-                                INCOTERMSKLAUZULA
-                            FROM IIS.VLPZAGLAVLJA
-                            WHERE ID > :lastId
-                              AND KIF IS NOT NULL
-                              AND DATUM = :godina
-                            ORDER BY ID
-                            FETCH NEXT :batchSize ROWS ONLY
-                            """;
+            if (kifIds.Count == 0)
+            {
+                return [];
+            }
 
-            var result = new List<VlpZaglavlje>(batchSize);
+            var parameterNames = kifIds
+                .Select((_, index) => $":kif{index}")
+                .ToList();
+
+            var sql = $"""
+                        SELECT
+                            ID,
+                            ORGJED,
+                            DOKUMENT,
+                            GODINA,
+                            BROJ,
+                            STORNO,
+                            SKLADISTE,
+                            KOMITENTTIP,
+                            KOMITENT,
+                            DATUM,
+                            VREME,
+                            VREMEKREIRANJA,
+                            DATUMVALUTE,
+                            DATUMDPO,
+                            EKSTERNIBROJ,
+                            POREZ,
+                            KORISNIK,
+                            KOMENTAR,
+                            RABAT,
+                            VLPZAGLAVLJE,
+                            KIF,
+                            NALOG,
+                            POTVRDJEN,
+                            POTVRDIO,
+                            VREMEPOTVRDE,
+                            BROJIZJAVE,
+                            DATUMIZJAVE,
+                            TIPDOBAVLJACA,
+                            TIPKUPCA,
+                            ZAVRSEN,
+                            PRODAVAC,
+                            PRODAJNACENA,
+                            KOMISIONAR,
+                            TAKSA,
+                            VALUTA,
+                            KURS,
+                            NADREDJENITIP,
+                            NADREDJENIKOMITENT,
+                            ARTIKAL,
+                            DODATNITROSAK,
+                            POREZNATROSAK,
+                            AVANSBROJ,
+                            AVANSIZNOS,
+                            PORESKAKLAUZULA,
+                            NACINISPORUKE,
+                            CENEZAKALKULACIJU,
+                            BROJPAKETA,
+                            DATUMRACUNA,
+                            BROJRACUNA,
+                            STORNIRAN,
+                            VLPRAZLOGPOVRATA,
+                            INCOTERMSKLAUZULA
+                        FROM IIS.VLPZAGLAVLJA
+                        WHERE KIF IN ({string.Join(", ", parameterNames)})
+                        ORDER BY KIF, ID
+                        """;
+
+            var result = new List<VlpZaglavlje>();
 
             await using var connection = new OracleConnection(BuildOracleConnectionString());
             await connection.OpenAsync(token);
@@ -336,9 +302,10 @@ namespace AswTransferToPantheon.Services.Implementation
             command.CommandText = sql;
             command.BindByName = true;
 
-            command.Parameters.Add("lastId", OracleDbType.Int64).Value = lastId;
-            command.Parameters.Add("godina", OracleDbType.Int32).Value = godina;
-            command.Parameters.Add("batchSize", OracleDbType.Int32).Value = batchSize;
+            for (var i = 0; i < kifIds.Count; i++)
+            {
+                command.Parameters.Add($"kif{i}", OracleDbType.Int64).Value = kifIds[i];
+            }
 
             await using var reader = await command.ExecuteReaderAsync(token);
 
@@ -402,50 +369,6 @@ namespace AswTransferToPantheon.Services.Implementation
             }
 
             return result;
-        }
-
-        private async Task<List<VlpZaglavlje>> FilterExistingVlpZaglavlja(List<VlpZaglavlje> vlpZaglavlja, CancellationToken token)
-        {
-            if (vlpZaglavlja.Count == 0)
-            {
-                return [];
-            }
-
-            var ids = vlpZaglavlja.Select(x => x.Id).ToList();
-
-            var parameterNames = ids
-                .Select((_, index) => $"@id{index}")
-                .ToList();
-
-            var sql = $"""
-                        SELECT ID
-                        FROM dbo.VLPZAGLAVLJA
-                        WHERE ID IN ({string.Join(", ", parameterNames)})
-                        """;
-
-            var existingIds = new HashSet<long>();
-
-            await using var connection = new SqlConnection(connectionStrings.Transfer);
-            await connection.OpenAsync(token);
-
-            await using var command = connection.CreateCommand();
-            command.CommandText = sql;
-
-            for (var i = 0; i < ids.Count; i++)
-            {
-                command.Parameters.AddWithValue($"@id{i}", ids[i]);
-            }
-
-            await using var reader = await command.ExecuteReaderAsync(token);
-
-            while (await reader.ReadAsync(token))
-            {
-                existingIds.Add(Convert.ToInt64(reader["ID"]));
-            }
-
-            return vlpZaglavlja
-                .Where(x => !existingIds.Contains(x.Id))
-                .ToList();
         }
 
         private async Task<List<KifKomentar>> ReadKifKomentari(List<long> kifIds, CancellationToken token)
@@ -644,7 +567,7 @@ namespace AswTransferToPantheon.Services.Implementation
                 .ToList();
         }
 
-        private async Task InsertKifPackage( List<Kif> kifovi, List<KifStavka> kifStavke, List<KifDatumValute> kifDatumValute, List<KifKomentar> kifKomentari, CancellationToken token)
+        private async Task InsertKifPackage( List<Kif> kifovi, List<KifStavka> kifStavke, List<KifDatumValute> kifDatumValute, List<KifKomentar> kifKomentari, List<VlpZaglavlje> vlpZaglavlja, CancellationToken token)
         {
             await using var connection = new SqlConnection(connectionStrings.Transfer);
             await connection.OpenAsync(token);
@@ -657,6 +580,7 @@ namespace AswTransferToPantheon.Services.Implementation
                 await BulkInsertKifStavke(connection, (SqlTransaction)transaction, kifStavke, token);
                 await BulkInsertKifDatumValute(connection, (SqlTransaction)transaction, kifDatumValute, token);
                 await BulkInsertKifKomentari(connection, (SqlTransaction)transaction, kifKomentari, token);
+                await BulkInsertVlpZaglavlja(connection, (SqlTransaction)transaction, vlpZaglavlja, token);
 
                 await transaction.CommitAsync(token);
             }
@@ -1273,9 +1197,9 @@ namespace AswTransferToPantheon.Services.Implementation
         {
             var builder = new OracleConnectionStringBuilder
             {
-                UserID = "panta",
+                UserID = connectionStrings.AswUser,
                 Password = connectionStrings.AswPassword,
-                DataSource = "(DESCRIPTION =(ADDRESS_LIST =(ADDRESS = (PROTOCOL = TCP)(HOST = 10.164.3.17)(PORT = 1521)))(CONNECT_DATA =(SID = log)))"
+                DataSource = connectionStrings.AswDataSource
             };
 
             return builder.ConnectionString;

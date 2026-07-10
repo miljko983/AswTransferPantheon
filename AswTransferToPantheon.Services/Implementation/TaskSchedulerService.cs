@@ -3,6 +3,8 @@ using AswTransferToPantheon.Infrastructure.Enums;
 using AswTransferToPantheon.Services.Interfaces;
 using Microsoft.Extensions.Options;
 using System.Text.Json;
+using AswTransferToPantheon.Infrastructure.Models;
+using AswTransferToPantheon.Services.Helpers;
 
 namespace AswTransferToPantheon.Services.Implementation
 {
@@ -16,18 +18,22 @@ namespace AswTransferToPantheon.Services.Implementation
         private readonly CancellationTokenSource cancellationTokenSource = new CancellationTokenSource();
         private readonly IArtikliTransferService artikliTransferService;
         private readonly ITransferFileLogger transferFileLogger;
+        private readonly IEmailNotificationService emailNotificationService;
         public Action<string> LogAction { get; set; }
 
         public Action<Exception, string> LogErrorAction { get; set; }
 
-        public TaskSchedulerService(IOptions<SchedulerConfiguration> schedulerConfiguration, 
-                                    IKifTransferService kifTransferService, 
-                                    IArtikliTransferService artikliTransferService)
+        public TaskSchedulerService(IOptions<SchedulerConfiguration> schedulerConfiguration,
+                                    IKifTransferService kifTransferService,
+                                    IArtikliTransferService artikliTransferService,
+                                    ITransferFileLogger transferFileLogger,
+                                    IEmailNotificationService emailNotificationService)
         {
             this.schedulerConfiguration = schedulerConfiguration;
             this.kifTransferService = kifTransferService;
             this.artikliTransferService = artikliTransferService;
             this.transferFileLogger = transferFileLogger;
+            this.emailNotificationService = emailNotificationService;
         }
 
         public Task ScheduleTasks()
@@ -63,7 +69,7 @@ namespace AswTransferToPantheon.Services.Implementation
             {
                 nextTime = DateTime.Now;
             }
-            else 
+            else
             {
                 nextTime = GetPeriodicStartTime(pt.Start, pt.End, pt.PeriodInMinutes);
             }
@@ -72,23 +78,51 @@ namespace AswTransferToPantheon.Services.Implementation
             {
                 var difference = nextTime.Subtract(DateTime.Now);
                 LogAction?.Invoke($"Scheduled periodic task {pt.Name} for {nextTime}.");
+
                 await Task.Delay(difference, cancellationTokenSource.Token);
+
                 LogAction?.Invoke($"Executing tasks for {pt.Name}...");
+
                 await ExecuteTasks(pt);
+
                 LogAction?.Invoke($"Executed tasks for {pt.Name}.");
             }
             catch (OperationCanceledException)
             {
-                // execution is cancelled, just stop.
                 transferFileLogger.Info(groupName, "Scheduler", $"Periodic task {pt.Name} cancelled.");
+            }
+            catch (CriticalTransferException exc)
+            {
+                transferFileLogger.Info(
+                    groupName,
+                    "Scheduler",
+                    $"Periodic task {pt.Name} stopped because of critical error. Next schedule will continue normally.");
             }
             catch (Exception exc)
             {
-                LogError(groupName, "Scheduler", $"Error executing periodic task {pt.Name}.", exc);
+                if (TransferErrorHelper.IsCriticalError(exc))
+                {
+                    await LogCritical(
+                        groupName,
+                        "Scheduler",
+                        $"Critical error executing periodic task {pt.Name}.",
+                        exc);
+                }
+                else
+                {
+                    LogError(
+                        groupName,
+                        "Scheduler",
+                        $"Error executing periodic task {pt.Name}.",
+                        exc);
+                }
             }
             finally
             {
-                _ = SchedulePeriodicTask(pt, false);
+                if (!cancellationTokenSource.IsCancellationRequested)
+                {
+                    _ = SchedulePeriodicTask(pt, false);
+                }
             }
         }
 
@@ -188,9 +222,31 @@ namespace AswTransferToPantheon.Services.Implementation
             {
                 transferFileLogger.Info(groupName, "Scheduler", $"Daily task {dtc.Name} cancelled.");
             }
+            catch (CriticalTransferException exc)
+            {
+                transferFileLogger.Info(
+                    groupName,
+                    "Scheduler",
+                    $"Daily task {dtc.Name} stopped because of critical error. Next schedule will continue normally.");
+            }
             catch (Exception exception)
             {
-                LogError(groupName, "Scheduler", $"Error executing daily task {dtc.Name}.", exception);
+                if (TransferErrorHelper.IsCriticalError(exception))
+                {
+                    await LogCritical(
+                        groupName,
+                        "Scheduler",
+                        $"Critical error executing daily task {dtc.Name}.",
+                        exception);
+                }
+                else
+                {
+                    LogError(
+                        groupName,
+                        "Scheduler",
+                        $"Error executing daily task {dtc.Name}.",
+                        exception);
+                }
             }
             finally
             {
@@ -245,9 +301,23 @@ namespace AswTransferToPantheon.Services.Implementation
 
         private async Task TransferKif(int batchSize, string groupName, string taskName)
         {
+            var badRecords = new List<BadRecordInfo>();
+
             kifTransferService.LogAction = CreateLogAction(groupName, taskName);
 
-            kifTransferService.BadRecordAction = (table, key, data, message, ex) => transferFileLogger.BadRecord(groupName, taskName, table, key, data, ex);
+            kifTransferService.BadRecordAction = (table, key, data, message, ex) =>
+            {
+                transferFileLogger.BadRecord(groupName, taskName, table, key, data, ex);
+
+                badRecords.Add(new BadRecordInfo
+                {
+                    TableName = table,
+                    Key = key,
+                    Message = message,
+                    Data = data,
+                    Exception = ex.Message
+                });
+            };
 
             try
             {
@@ -257,32 +327,81 @@ namespace AswTransferToPantheon.Services.Implementation
                     batchSize,
                     cancellationTokenSource.Token);
 
+                if (badRecords.Count > 0)
+                {
+                    await emailNotificationService.SendBadRecordsSummaryEmail(
+                        groupName,
+                        taskName,
+                        badRecords,
+                        cancellationTokenSource.Token);
+                }
+
                 transferFileLogger.Info(groupName, taskName, $"END {taskName}.");
             }
             catch (Exception exception)
             {
-                LogError(groupName, taskName, $"Greška u tasku {taskName}.", exception);
+                if (TransferErrorHelper.IsCriticalError(exception))
+                {
+                    var message = $"Kritična greška u tasku {taskName}. Trenutno izvršavanje se prekida do sledećeg zakazanog termina.";
+
+                    await LogCritical(groupName, taskName, message, exception);
+
+                    throw new CriticalTransferException(message, exception);
+                }
+
                 throw;
             }
         }
-
         private async Task TransferArtikli(int batchSize, string groupName, string taskName)
         {
+            var badRecords = new List<BadRecordInfo>();
+
             artikliTransferService.LogAction = CreateLogAction(groupName, taskName);
-            
-            artikliTransferService.BadRecordAction = (table, key, data, message, ex) => transferFileLogger.BadRecord(groupName, taskName, table, key, data, ex);
-            
+
+            artikliTransferService.BadRecordAction = (table, key, data, message, ex) =>
+            {
+                transferFileLogger.BadRecord(groupName, taskName, table, key, data, ex);
+
+                badRecords.Add(new BadRecordInfo
+                {
+                    TableName = table,
+                    Key = key,
+                    Message = message,
+                    Data = data,
+                    Exception = ex.Message
+                });
+            };
+
             try
             {
                 transferFileLogger.Info(groupName, taskName, $"START {taskName}. BatchSize: {batchSize}");
 
-                await artikliTransferService.TransferArtikliPaket(batchSize, cancellationTokenSource.Token);
+                await artikliTransferService.TransferArtikliPaket(
+                    batchSize,
+                    cancellationTokenSource.Token);
+
+                if (badRecords.Count > 0)
+                {
+                    await emailNotificationService.SendBadRecordsSummaryEmail(
+                        groupName,
+                        taskName,
+                        badRecords,
+                        cancellationTokenSource.Token);
+                }
 
                 transferFileLogger.Info(groupName, taskName, $"END {taskName}.");
             }
             catch (Exception exception)
             {
-                LogError(groupName, taskName, $"Greška u tasku {taskName}.", exception);
+                if (TransferErrorHelper.IsCriticalError(exception))
+                {
+                    var message = $"Kritična greška u tasku {taskName}. Trenutno izvršavanje se prekida do sledećeg zakazanog termina.";
+
+                    await LogCritical(groupName, taskName, message, exception);
+
+                    throw new CriticalTransferException(message, exception);
+                }
+
                 throw;
             }
         }
@@ -338,6 +457,49 @@ namespace AswTransferToPantheon.Services.Implementation
         {
             LogErrorAction?.Invoke(exception, message);
             transferFileLogger.Error(groupName, taskName, message, exception);
+
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    await emailNotificationService.SendTaskErrorEmail(groupName, taskName, message, exception,cancellationTokenSource.Token);
+                }
+                catch (Exception emailException)
+                {
+                    transferFileLogger.Error(
+                        groupName,
+                        taskName,
+                        "Greška pri slanju task error email obaveštenja.",
+                        emailException);
+                }
+            });
+        }
+
+        private async Task LogCritical(string groupName, string taskName, string message, Exception exception)
+        {
+            var criticalMessage = $"CRITICAL: {message}";
+
+            LogErrorAction?.Invoke(exception, criticalMessage);
+
+            transferFileLogger.Error(groupName, taskName, criticalMessage, exception);
+
+            try
+            {
+                await emailNotificationService.SendTaskErrorEmail(
+                    groupName,
+                    taskName,
+                    criticalMessage,
+                    exception,
+                    CancellationToken.None);
+            }
+            catch (Exception emailException)
+            {
+                transferFileLogger.Error(
+                    groupName,
+                    taskName,
+                    "Greška pri slanju critical error email obaveštenja.",
+                    emailException);
+            }
         }
     }
 }
