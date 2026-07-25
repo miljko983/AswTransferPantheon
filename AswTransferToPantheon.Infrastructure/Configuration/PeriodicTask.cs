@@ -7,6 +7,7 @@ namespace AswTransferToPantheon.Infrastructure.Configuration
         public string Name { get; set; }
         public int BatchSize { get; set; }
 
+        public int DaysBack { get; set; }
         public TimeSpan Start { get; set; }
 
         public TimeSpan? End { get; set; }

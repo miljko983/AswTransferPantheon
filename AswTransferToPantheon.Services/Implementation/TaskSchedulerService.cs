@@ -19,6 +19,7 @@ namespace AswTransferToPantheon.Services.Implementation
         private readonly IArtikliTransferService artikliTransferService;
         private readonly ITransferFileLogger transferFileLogger;
         private readonly IEmailNotificationService emailNotificationService;
+        private readonly IVlpIzvSveTransferService vlpIzvSveTransferService;
         public Action<string> LogAction { get; set; }
 
         public Action<Exception, string> LogErrorAction { get; set; }
@@ -26,14 +27,17 @@ namespace AswTransferToPantheon.Services.Implementation
         public TaskSchedulerService(IOptions<SchedulerConfiguration> schedulerConfiguration,
                                     IKifTransferService kifTransferService,
                                     IArtikliTransferService artikliTransferService,
+                                    IVlpIzvSveTransferService vlpIzvSveTransferService,
                                     ITransferFileLogger transferFileLogger,
                                     IEmailNotificationService emailNotificationService)
         {
             this.schedulerConfiguration = schedulerConfiguration;
             this.kifTransferService = kifTransferService;
             this.artikliTransferService = artikliTransferService;
+            this.vlpIzvSveTransferService = vlpIzvSveTransferService;
             this.transferFileLogger = transferFileLogger;
             this.emailNotificationService = emailNotificationService;
+
         }
 
         public Task ScheduleTasks()
@@ -132,7 +136,7 @@ namespace AswTransferToPantheon.Services.Implementation
 
             foreach (var task in pt.Tasks)
             {
-                await GetTask(task, pt.BatchSize, groupName);
+                await GetTask(task, pt.BatchSize, groupName, pt.DaysBack);
             }
         }
 
@@ -284,7 +288,7 @@ namespace AswTransferToPantheon.Services.Implementation
             return nextTime;
         }
 
-        private Task GetTask(TaskType type, int batchSize, string groupName)
+        private Task GetTask(TaskType type, int batchSize, string groupName, int daysBack = 0)
         {
             switch (type)
             {
@@ -293,7 +297,8 @@ namespace AswTransferToPantheon.Services.Implementation
 
                 case TaskType.Kif:
                     return TransferKif(batchSize, groupName, nameof(TaskType.Kif));
-
+                case TaskType.VLPIzvSve:
+                    return TransferVlpIzvSve(batchSize,  daysBack,  groupName,  nameof(TaskType.VLPIzvSve));
                 default:
                     return Task.CompletedTask;
             }
@@ -499,6 +504,76 @@ namespace AswTransferToPantheon.Services.Implementation
                     taskName,
                     "Greška pri slanju critical error email obaveštenja.",
                     emailException);
+            }
+        }
+
+        private async Task TransferVlpIzvSve(int batchSize, int daysBack, string groupName, string taskName)
+        {
+            var badRecords = new List<BadRecordInfo>();
+
+            vlpIzvSveTransferService.LogAction = CreateLogAction(groupName, taskName);
+
+            vlpIzvSveTransferService.BadRecordAction = (table, key, data, message, ex) =>
+                {
+                    transferFileLogger.BadRecord(groupName, taskName, table, key, data, ex);
+
+                    badRecords.Add(new BadRecordInfo
+                    {
+                        TableName = table,
+                        Key = key,
+                        Message = message,
+                        Data = data,
+                        Exception = ex.Message
+                    });
+                };
+
+            try
+            {
+                transferFileLogger.Info(
+                    groupName,
+                    taskName,
+                    $"START {taskName}. " +
+                    $"BatchSize: {batchSize}, DaysBack: {daysBack}");
+
+                await vlpIzvSveTransferService.Transfer(
+                    batchSize,
+                    daysBack,
+                    cancellationTokenSource.Token);
+
+                if (badRecords.Count > 0)
+                {
+                    await emailNotificationService.SendBadRecordsSummaryEmail(
+                        groupName,
+                        taskName,
+                        badRecords,
+                        cancellationTokenSource.Token);
+                }
+
+                transferFileLogger.Info(
+                    groupName,
+                    taskName,
+                    $"END {taskName}.");
+            }
+            catch (Exception exception)
+            {
+                if (TransferErrorHelper.IsCriticalError(exception))
+                {
+                    var message =
+                        $"Kritična greška u tasku {taskName}. " +
+                        "Trenutno izvršavanje se prekida do sledećeg zakazanog termina.";
+
+                    await LogCritical(
+                        groupName,
+                        taskName,
+                        message,
+                        exception);
+
+                    throw new CriticalTransferException(
+                        message,
+                        exception);
+                }
+
+                throw;
             }
         }
     }
