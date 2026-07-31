@@ -21,10 +21,7 @@ public sealed class VlpIzvSveTransferService : IVlpIzvSveTransferService
         this.connectionStrings = connectionStrings.Value;
     }
 
-    public async Task Transfer(
-    int batchSize,
-    int daysBack,
-    CancellationToken token)
+    public async Task Transfer(int batchSize, int daysBack, CancellationToken token)
     {
         if (token.IsCancellationRequested)
         {
@@ -37,19 +34,13 @@ public sealed class VlpIzvSveTransferService : IVlpIzvSveTransferService
         var totalStavke = 0;
         var totalVarijante = 0;
 
-        LogAction?.Invoke(
-            $"VLPIzvSve - početak prenosa. Poslednjih {daysBack} dana.");
+        LogAction?.Invoke($"VLPIzvSve - početak prenosa. Poslednjih {daysBack} dana.");
 
         while (!token.IsCancellationRequested)
         {
             batchNumber++;
 
-            var zaglavlja =
-                await ReadVlpIzvSveZaglavljaBatch(
-                    lastId,
-                    batchSize,
-                    daysBack,
-                    token);
+            var zaglavlja = await ReadVlpIzvSveZaglavljaBatch(lastId, batchSize, daysBack, token);
 
             if (zaglavlja.Count == 0)
             {
@@ -62,7 +53,7 @@ public sealed class VlpIzvSveTransferService : IVlpIzvSveTransferService
 
             var stavke = await ReadVlpIzvSveStavke(zaglavljeIds, token);
 
-            var varijante =await ReadVlpIzvSveVarijante( zaglavljeIds, token);
+            var varijante = await ReadVlpIzvSveVarijante(stavke, token);
 
             await SaveVlpIzvSvePackage(zaglavlja, stavke, varijante, token);
 
@@ -89,13 +80,19 @@ public sealed class VlpIzvSveTransferService : IVlpIzvSveTransferService
             $"{totalVarijante} varijanti.");
     }
 
-    private async Task SaveVlpIzvSvePackage(List<VlpIzvSveZaglavlje> zaglavlja, List<VlpIzvSveStavka> stavke, List<VlpIzvSveVarijanta> varijante, CancellationToken token)
+    private async Task SaveVlpIzvSvePackage(
+    List<VlpIzvSveZaglavlje> zaglavlja,
+    List<VlpIzvSveStavka> stavke,
+    List<VlpIzvSveVarijanta> varijante,
+    CancellationToken token)
     {
-        await using var connection = new SqlConnection(connectionStrings.Transfer);
+        await using var connection =
+            new SqlConnection(connectionStrings.Transfer);
 
         await connection.OpenAsync(token);
 
-        await using var transaction = await connection.BeginTransactionAsync(token);
+        await using var transaction =
+            await connection.BeginTransactionAsync(token);
 
         var sqlTransaction = (SqlTransaction)transaction;
 
@@ -137,22 +134,25 @@ public sealed class VlpIzvSveTransferService : IVlpIzvSveTransferService
                 varijante,
                 token);
 
+            // 1. Prvo zaglavlja
             await ExecuteMergeProcedure(
                 connection,
                 sqlTransaction,
-                "dbo._pr_MergeVLPZAGLAVLJA_IZV_SVE",
+                "dbo._pr_InsertVLPZAGLAVLJA_IZV_SVE",
                 token);
 
+            // 2. Zatim stavke
             await ExecuteMergeProcedure(
                 connection,
                 sqlTransaction,
-                "dbo._pr_MergeVLPSTAVKE_IZV_SVE",
+                "dbo._pr_InsertVLPSTAVKE_IZV_SVE",
                 token);
 
+            // 3. Na kraju varijante
             await ExecuteMergeProcedure(
                 connection,
                 sqlTransaction,
-                "dbo._pr_MergeVLPVARIJANTE_IZV_SVE",
+                "dbo._pr_InsertVLPVARIJANTE_IZV_SVE",
                 token);
 
             await transaction.CommitAsync(token);
@@ -463,7 +463,21 @@ public sealed class VlpIzvSveTransferService : IVlpIzvSveTransferService
     }
     private async Task<List<VlpIzvSveZaglavlje>> ReadVlpIzvSveZaglavljaBatch(long lastId, int batchSize, int daysBack, CancellationToken token)
     {
-        const string sql = """
+        var dateFilter = daysBack > 0 ? "AND DATUM >= SYSDATE - :daysBack" : """ AND DATUM >= :fromDate AND DATUM < :toDateExclusive """;
+
+        DateTime fromDate = default;
+        DateTime toDateExclusive = default;
+
+        if (daysBack == 0)
+        {
+            var today = DateTime.Now;
+            var firstDayOfCurrentMonth = new DateTime(today.Year, today.Month, 1);
+
+            fromDate = today.Day <= 15 ? firstDayOfCurrentMonth.AddMonths(-1) : firstDayOfCurrentMonth;
+            toDateExclusive = today.Date.AddDays(1);
+        }
+
+        var sql = $"""
                 SELECT
                     ID,
                     ORGJED,
@@ -517,11 +531,19 @@ public sealed class VlpIzvSveTransferService : IVlpIzvSveTransferService
                     STORNIRAN
                 FROM IIS.VLPZAGLAVLJA
                 WHERE ID > :lastId
-                  AND DATUM >= SYSDATE - :daysBack
+                  {dateFilter}
+                  AND POTVRDJEN = 'D'
                 ORDER BY ID
                 FETCH NEXT :batchSize ROWS ONLY
                 """;
 
+
+       // AND(
+        //              UPPER(TRIM(ORGJED)) LIKE 'LUK%'
+        //
+          //            OR UPPER(TRIM(ORGJED)) LIKE 'CSODG%'
+          //          )
+          //        AND DOKUMENT<> 42
         var result = new List<VlpIzvSveZaglavlje>(batchSize);
 
         await using var connection = new OracleConnection(BuildOracleConnectionString());
@@ -534,11 +556,19 @@ public sealed class VlpIzvSveTransferService : IVlpIzvSveTransferService
         command.BindByName = true;
 
         command.Parameters.Add("lastId", OracleDbType.Int64).Value = lastId;
-        command.Parameters.Add("daysBack", OracleDbType.Int32).Value = daysBack;
         command.Parameters.Add("batchSize", OracleDbType.Int32).Value = batchSize;
 
-        await using var reader =
-            await command.ExecuteReaderAsync(token);
+        if (daysBack > 0)
+        {
+            command.Parameters.Add("daysBack", OracleDbType.Int32).Value = daysBack;
+        }
+        else
+        {
+            command.Parameters.Add("fromDate", OracleDbType.Date).Value = fromDate;
+            command.Parameters.Add("toDateExclusive", OracleDbType.Date).Value = toDateExclusive;
+        }
+
+        await using var reader =await command.ExecuteReaderAsync(token);
 
         while (await reader.ReadAsync(token))
         {
@@ -581,8 +611,7 @@ public sealed class VlpIzvSveTransferService : IVlpIzvSveTransferService
                 Valuta = GetRequiredString(reader, "VALUTA"),
                 Kurs = GetRequiredDecimal(reader, "KURS"),
                 NadredjeniTip = GetString(reader, "NADREDJENITIP"),
-                NadredjeniKomitent =
-                    GetNullableInt32(reader, "NADREDJENIKOMITENT"),
+                NadredjeniKomitent = GetNullableInt32(reader, "NADREDJENIKOMITENT"),
                 Artikal = GetNullableInt32(reader, "ARTIKAL"),
                 DodatniTrosak = GetNullableDecimal(reader, "DODATNITROSAK"),
                 PorezNaTrosak = GetNullableDecimal(reader, "POREZNATROSAK"),
@@ -590,8 +619,7 @@ public sealed class VlpIzvSveTransferService : IVlpIzvSveTransferService
                 AvansIznos = GetNullableDecimal(reader, "AVANSIZNOS"),
                 PoreskaKlauzula = GetString(reader, "PORESKAKLAUZULA"),
                 NacinIsporuke = GetString(reader, "NACINISPORUKE"),
-                CeneZaKalkulaciju =
-                    GetRequiredString(reader, "CENEZAKALKULACIJU"),
+                CeneZaKalkulaciju = GetRequiredString(reader, "CENEZAKALKULACIJU"),
                 BrojPaketa = GetNullableInt32(reader, "BROJPAKETA"),
                 DatumRacuna = GetDateTime(reader, "DATUMRACUNA"),
                 BrojRacuna = GetString(reader, "BROJRACUNA"),
@@ -720,7 +748,6 @@ public sealed class VlpIzvSveTransferService : IVlpIzvSveTransferService
                     DATUMVALUTE
                 FROM IIS.VLPSTAVKE
                 WHERE VLPZAGLAVLJE IN ({string.Join(", ", parameterNames)})
-                ORDER BY VLPZAGLAVLJE, REDNIBROJ
                 """;
 
         var result = new List<VlpIzvSveStavka>();
@@ -737,9 +764,7 @@ public sealed class VlpIzvSveTransferService : IVlpIzvSveTransferService
 
         for (var i = 0; i < zaglavljeIds.Count; i++)
         {
-            command.Parameters.Add(
-                $"zaglavlje{i}",
-                OracleDbType.Int64).Value = zaglavljeIds[i];
+            command.Parameters.Add($"zaglavlje{i}", OracleDbType.Int64).Value = zaglavljeIds[i];
         }
 
         await using var reader =
@@ -768,19 +793,31 @@ public sealed class VlpIzvSveTransferService : IVlpIzvSveTransferService
         }
         return result;
     }
-    private async Task<List<VlpIzvSveVarijanta>> ReadVlpIzvSveVarijante(List<long> zaglavljeIds, CancellationToken token)
+    private async Task<List<VlpIzvSveVarijanta>>
+    ReadVlpIzvSveVarijante(List<VlpIzvSveStavka> stavke, CancellationToken token)
     {
-        if (zaglavljeIds.Count == 0)
+        if (stavke.Count == 0)
         {
             return [];
         }
+
+        var zaglavljeIds = stavke
+            .Select(x => (long)x.VlpZaglavlje)
+            .Distinct()
+            .ToList();
+
+        var validniParovi = stavke
+            .Select(x => (
+                VlpZaglavlje: x.VlpZaglavlje,
+                RedniBroj: x.RedniBroj))
+            .ToHashSet();
 
         var parameterNames = zaglavljeIds
             .Select((_, index) => $":zaglavlje{index}")
             .ToList();
 
         var sql = $"""
-                SELECT
+                    SELECT
                         CAST(ID AS NUMBER(10, 0)) AS ID,
                         CAST(VLPZAGLAVLJE AS NUMBER(10, 0)) AS VLPZAGLAVLJE,
                         CAST(REDNIBROJ AS NUMBER(10, 0)) AS REDNIBROJ,
@@ -797,10 +834,11 @@ public sealed class VlpIzvSveTransferService : IVlpIzvSveTransferService
                         CAST(SKLADISNA AS NUMBER(16, 3)) AS SKLADISNA,
                         CAST(DUGUJE AS NUMBER(16, 2)) AS DUGUJE,
                         CAST(POTRAZUJE AS NUMBER(16, 2)) AS POTRAZUJE
-                FROM IIS.VLPVARIJANTE
-                WHERE VLPZAGLAVLJE IN ({string.Join(", ", parameterNames)})
-                ORDER BY VLPZAGLAVLJE, REDNIBROJ, REDNIBROJVAR, ID
-                """;
+                    FROM IIS.VLPVARIJANTE
+                    WHERE VLPZAGLAVLJE IN ({string.Join(", ", parameterNames)})
+                    ORDER BY                        
+                        ID
+                    """;
 
         var result = new List<VlpIzvSveVarijanta>();
 
@@ -816,14 +854,17 @@ public sealed class VlpIzvSveTransferService : IVlpIzvSveTransferService
 
         for (var i = 0; i < zaglavljeIds.Count; i++)
         {
-            command.Parameters.Add($"zaglavlje{i}", OracleDbType.Int64).Value = zaglavljeIds[i];
+            command.Parameters.Add(
+                $"zaglavlje{i}",
+                OracleDbType.Int64).Value = zaglavljeIds[i];
         }
 
-        await using var reader = await command.ExecuteReaderAsync(token);
+        await using var reader =
+            await command.ExecuteReaderAsync(token);
 
         while (await reader.ReadAsync(token))
         {
-            result.Add(new VlpIzvSveVarijanta
+            var varijanta = new VlpIzvSveVarijanta
             {
                 Id = GetRequiredInt32(reader, "ID"),
                 VlpZaglavlje = GetRequiredInt32(reader, "VLPZAGLAVLJE"),
@@ -841,7 +882,13 @@ public sealed class VlpIzvSveTransferService : IVlpIzvSveTransferService
                 Skladisna = GetRequiredDecimal(reader, "SKLADISNA"),
                 Duguje = GetRequiredDecimal(reader, "DUGUJE"),
                 Potrazuje = GetRequiredDecimal(reader, "POTRAZUJE")
-            });
+            };
+
+            if (validniParovi.Contains(
+                (varijanta.VlpZaglavlje, varijanta.RedniBroj)))
+            {
+                result.Add(varijanta);
+            }
         }
 
         return result;
