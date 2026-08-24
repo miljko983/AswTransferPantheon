@@ -32,14 +32,15 @@ namespace AswTransferToPantheon
                 services.Configure<SchedulerConfiguration>(context.Configuration.GetSection("Scheduler"));
                 services.Configure<LoggingConfiguration>(context.Configuration.GetSection("Logging"));
                 services.Configure<EmailConfiguration>(context.Configuration.GetSection("Email"));
-
                 
+
                 services.AddTransient<IKifTransferService, KifTransferService>();
                 services.AddTransient<IArtikliTransferService, ArtikliTransferService>();
                 services.AddTransient<IVlpIzvSveTransferService, VlpIzvSveTransferService>();
                 services.AddSingleton<ITransferFileLogger, TransferFileLogger>();
                 services.AddSingleton<IEmailNotificationService, EmailNotificationService>();
                 services.AddSingleton<ITaskSchedulerService, TaskSchedulerService>();
+                services.AddTransient<IDocumentCreationService_CL_WMS, DocumentCreationService_CL_WMS>();
             })
             .Build();
         }

@@ -17,6 +17,7 @@ namespace AswTransferToPantheon.Services.Implementation
 
         public Action<string> LogAction { get; set; }
         public Action<string, string, string, string, Exception>? BadRecordAction { get; set; }
+        public Action<CreatedArticleInfo>? CreatedArticleAction { get; set; }
 
         public ArtikliTransferService(IOptions<ConnectionStrings> connectionStrings)
         {
@@ -26,11 +27,135 @@ namespace AswTransferToPantheon.Services.Implementation
         public async Task TransferArtikliPaket(int batchSize, CancellationToken token)
         {
             await ExecuteWithLogging("Artikli", () => TransferArtikli(batchSize, token));
+            await ExecuteWithLogging("Cenovnik", () => TransferCenovnik(batchSize, token));
             await ExecuteWithLogging("Artikli dobavljači",() => TransferArtikliDobavljaci(batchSize, token));
             await ExecuteWithLogging("Artikli osobine",() => TransferArtikliOsobine(batchSize, token));
             await ExecuteWithLogging("Barkodovi", () => TransferBarkodovi(batchSize, token));
             await ExecuteWithLogging("Robne grupe", () => TransferRobneGrupe(batchSize, token));
-        }        
+            await ExecuteWithLogging("CL_WMS artikli uvoz", () => ExecuteClWmsArtikliUvoz(token));
+        }
+
+        private async Task ExecuteClWmsArtikliUvoz(CancellationToken token)
+        {
+            await using var connection =
+                new SqlConnection(connectionStrings.Transfer);
+
+            await connection.OpenAsync(token);
+
+            await using var command = connection.CreateCommand();
+
+            command.CommandText = "dbo._pr_CL_WMS_ArtikliUvoz";
+
+            command.CommandType = CommandType.StoredProcedure;
+
+            command.CommandTimeout = 300;
+
+            await using var reader = await command.ExecuteReaderAsync(token);
+
+            var rejectedCount = 0;
+            var createdCount = 0;
+
+            /*
+             * PRVI RESULT SET:
+             * Neispravni redovi
+             */
+            if (reader.FieldCount > 0)
+            {
+                var tableOrdinal = reader.GetOrdinal("TableName");
+                var keyOrdinal = reader.GetOrdinal("RecordKey");
+                var dataOrdinal = reader.GetOrdinal("RecordData");
+                var reasonOrdinal = reader.GetOrdinal("Reason");
+
+                while (await reader.ReadAsync(token))
+                {
+                    var tableName =
+                        reader.IsDBNull(tableOrdinal)
+                            ? string.Empty
+                            : reader.GetValue(tableOrdinal)?.ToString()
+                              ?? string.Empty;
+
+                    var key =
+                        reader.IsDBNull(keyOrdinal)
+                            ? string.Empty
+                            : reader.GetValue(keyOrdinal)?.ToString()
+                              ?? string.Empty;
+
+                    var data =
+                        reader.IsDBNull(dataOrdinal)
+                            ? string.Empty
+                            : reader.GetValue(dataOrdinal)?.ToString()
+                              ?? string.Empty;
+
+                    var reason =
+                        reader.IsDBNull(reasonOrdinal)
+                            ? "Nepoznat razlog."
+                            : reader.GetValue(reasonOrdinal)?.ToString()
+                              ?? "Nepoznat razlog.";
+
+                    rejectedCount++;
+
+                    BadRecordAction?.Invoke(
+                        tableName,
+                        key,
+                        data,
+                        reason,
+                        new InvalidOperationException(reason));
+                }
+            }
+
+            /*
+             * DRUGI RESULT SET:
+             * Kreirani artikli
+             */
+            if (await reader.NextResultAsync(token)
+                && reader.FieldCount > 0)
+            {
+                var identOrdinal = reader.GetOrdinal("AcIdent");
+
+                var nameOrdinal = reader.GetOrdinal("AcName");
+
+                var classifOrdinal = reader.GetOrdinal("AcClassif");
+
+                while (await reader.ReadAsync(token))
+                {
+                    CreatedArticleAction?.Invoke(
+                        new CreatedArticleInfo
+                        {
+                            AcIdent =
+                                reader.IsDBNull(identOrdinal)
+                                    ? string.Empty
+                                    : reader.GetValue(identOrdinal)?.ToString()
+                                      ?? string.Empty,
+
+                            AcName =
+                                reader.IsDBNull(nameOrdinal)
+                                    ? string.Empty
+                                    : reader.GetValue(nameOrdinal)?.ToString()
+                                      ?? string.Empty,
+
+                            AcClassif =
+                                reader.IsDBNull(classifOrdinal)
+                                    ? string.Empty
+                                    : reader.GetValue(classifOrdinal)?.ToString()
+                                      ?? string.Empty
+                        });
+
+                    createdCount++;
+                }
+            }
+
+            if (rejectedCount > 0)
+            {
+                LogAction?.Invoke(
+                    $"CL_WMS uvoz: preskočeno {rejectedCount} neispravnih redova.");
+            }
+
+            if (createdCount > 0)
+            {
+                LogAction?.Invoke(
+                    $"CL_WMS uvoz: kreirano {createdCount} novih artikala.");
+            }
+        }
 
         private async Task TransferArtikli(int batchSize, CancellationToken token)
         {
@@ -1393,6 +1518,283 @@ namespace AswTransferToPantheon.Services.Implementation
         {
             var ordinal = reader.GetOrdinal(columnName);
             return reader.IsDBNull(ordinal) ? null : Convert.ToInt64(reader.GetValue(ordinal));
+        }
+
+        private static DataTable CreateCenovnikDataTable(List<Cenovnik> cenovnici)
+        {
+            var table = new DataTable();
+
+            table.Columns.Add("SKLADISTE", typeof(string));
+            table.Columns.Add("ARTIKAL", typeof(decimal));
+            table.Columns.Add("TIPCENE", typeof(string));
+            table.Columns.Add("VREMEOD", typeof(DateTime));
+            table.Columns.Add("VREMEDO", typeof(DateTime));
+            table.Columns.Add("CENA", typeof(decimal));
+
+            foreach (var item in cenovnici)
+            {
+                table.Rows.Add(Required(item.Skladiste, item.Artikal, nameof(item.Skladiste)),
+
+                    Convert.ToDecimal(item.Artikal),
+
+                    Required(item.TipCene, item.Artikal,nameof(item.TipCene)),
+
+                    item.VremeOd,
+                    item.VremeDo,
+                    item.Cena);
+            }
+
+            return table;
+        }
+
+        private static async Task ClearCenovnikTmp(SqlConnection connection, SqlTransaction transaction, CancellationToken token)
+        {
+            await using var command = connection.CreateCommand();
+
+            command.Transaction = transaction;
+            command.CommandText ="TRUNCATE TABLE dbo._tb_CENOVNIK_TMP;";
+
+            await command.ExecuteNonQueryAsync(token);
+        }
+
+        private static async Task BulkInsertCenovnikTmp(SqlConnection connection, SqlTransaction transaction, List<Cenovnik> cenovnici, CancellationToken token)
+        {
+            var table = CreateCenovnikDataTable(cenovnici);
+
+            using var bulkCopy = new SqlBulkCopy(connection, SqlBulkCopyOptions.CheckConstraints, transaction);
+
+            bulkCopy.DestinationTableName ="dbo._tb_CENOVNIK_TMP";
+
+            bulkCopy.BatchSize = cenovnici.Count;
+            bulkCopy.BulkCopyTimeout = 60;
+
+            bulkCopy.ColumnMappings.Add("SKLADISTE", "SKLADISTE");
+            bulkCopy.ColumnMappings.Add("ARTIKAL", "ARTIKAL");
+            bulkCopy.ColumnMappings.Add("TIPCENE", "TIPCENE");
+            bulkCopy.ColumnMappings.Add("VREMEOD", "VREMEOD");
+            bulkCopy.ColumnMappings.Add("VREMEDO", "VREMEDO");
+            bulkCopy.ColumnMappings.Add("CENA", "CENA");
+
+            await bulkCopy.WriteToServerAsync(table, token);
+        }
+
+        private static async Task InsertCenovnik(SqlConnection connection, SqlTransaction transaction, CancellationToken token)
+        {
+            await using var command = connection.CreateCommand();
+
+            command.Transaction = transaction;
+            command.CommandText = "dbo._pr_InsertCenovnik";
+
+            command.CommandType = CommandType.StoredProcedure;
+
+            command.CommandTimeout = 120;
+
+            await command.ExecuteNonQueryAsync(token);
+        }
+
+        private async Task<List<Cenovnik>> ReadCenovnikBatch(DateTime? lastVremeOd, int offset, int batchSize, CancellationToken token)
+        {
+            const string sql = """
+                            SELECT
+                                SKLADISTE,
+                                ARTIKAL,
+                                TIPCENE,
+                                VREMEOD,
+                                VREMEDO,
+                                CAST(CENA AS NUMBER(18, 4)) AS CENA
+                            FROM IIS.CENOVNIK
+                            WHERE VREMEOD >= DATE '2026-01-01'
+                              AND
+                              (
+                                  :lastVremeOd IS NULL
+                                  OR VREMEOD > :lastVremeOd
+                              )
+                            ORDER BY
+                                SKLADISTE,
+                                ARTIKAL,
+                                TIPCENE,
+                                VREMEOD
+                            OFFSET :rowOffset ROWS
+                            FETCH NEXT :batchSize ROWS ONLY
+                            """;
+
+            var result = new List<Cenovnik>(batchSize);
+
+            await using var connection = new OracleConnection(BuildOracleConnectionString());
+
+            await connection.OpenAsync();
+
+            await using var command = connection.CreateCommand();
+
+            command.CommandText = sql;
+            command.BindByName = true;
+
+            command.Parameters.Add("lastVremeOd", OracleDbType.Date).Value = lastVremeOd.HasValue ? lastVremeOd.Value : DBNull.Value;
+
+            command.Parameters.Add("rowOffset", OracleDbType.Int32).Value = offset;
+
+            command.Parameters.Add("batchSize", OracleDbType.Int32).Value = batchSize;
+
+            await using var reader = await command.ExecuteReaderAsync(token);
+
+            while (await reader.ReadAsync(token))
+            {
+                result.Add(new Cenovnik
+                {
+                    Skladiste = GetString(reader, "SKLADISTE"),
+
+                    Artikal = GetInt64(reader, "ARTIKAL"),
+
+                    TipCene = GetString(reader, "TIPCENE"),
+
+                    VremeOd = GetRequiredDateTime(reader, "VREMEOD"),
+
+                    VremeDo = GetRequiredDateTime(reader, "VREMEDO"),
+
+                    Cena = GetRequiredDecimal(reader, "CENA")
+                });
+            }
+
+            return result;
+        }
+
+        private async Task SaveCenovnikBatchWithFallback(List<Cenovnik> cenovnici, CancellationToken token)
+        {
+            try
+            {
+                await SaveCenovnikToTmpTable(cenovnici, token);
+            }
+            catch (Exception batchException)
+            {
+                if (TransferErrorHelper.IsCriticalError(batchException))
+                {
+                    throw;
+                }
+
+                LogAction?.Invoke($"CENOVNIK paket od {cenovnici.Count} redova je pukao: " + $"{batchException.Message}. Pokušavam red po red...");
+
+                foreach (var cenovnik in cenovnici)
+                {
+                    if (token.IsCancellationRequested)
+                    {
+                        return;
+                    }
+
+                    try
+                    {
+                        await SaveCenovnikToTmpTable([cenovnik], token);
+                    }
+                    catch (Exception rowException)
+                    {
+                        BadRecordAction?.Invoke(
+                            "CENOVNIK",
+                            $"SKLADISTE={cenovnik.Skladiste}; " +
+                            $"ARTIKAL={cenovnik.Artikal}; " +
+                            $"TIPCENE={cenovnik.TipCene}; " +
+                            $"VREMEOD={cenovnik.VremeOd:yyyy-MM-dd HH:mm:ss}",
+                            JsonSerializer.Serialize(cenovnik),
+                            "Greška pri upisu jednog cenovnika.",
+                            rowException);
+                    }
+                }
+            }
+        }
+
+        private async Task<DateTime?> GetLastCenovnikVreme(CancellationToken token)
+        {
+            await using var connection =
+                new SqlConnection(connectionStrings.Transfer);
+
+            await connection.OpenAsync(token);
+
+            await using var command =connection.CreateCommand();
+
+            command.CommandText = """
+                SELECT MAX(VREMEOD)
+                FROM dbo.CENOVNIK;
+                """;
+
+            var value =await command.ExecuteScalarAsync(token);
+
+            if (value is null || value == DBNull.Value)
+            {
+                return null;
+            }
+
+            return Convert.ToDateTime(value);
+        }
+
+        private async Task TransferCenovnik(int batchSize, CancellationToken token)
+        {
+            var lastVremeOd =
+                await GetLastCenovnikVreme(token);
+
+            var offset = 0;
+            var ukupno = 0;
+            var paket = 0;
+
+            LogAction?.Invoke(
+                $"CENOVNIK - početak prenosa. " +
+                $"Poslednji VREMEOD: " +
+                $"{lastVremeOd?.ToString("yyyy-MM-dd HH:mm:ss") ?? "nema podataka"}.");
+
+            while (!token.IsCancellationRequested)
+            {
+                paket++;
+
+                var cenovnici =
+                    await ReadCenovnikBatch(
+                        lastVremeOd,
+                        offset,
+                        batchSize,
+                        token);
+
+                if (cenovnici.Count == 0)
+                {
+                    break;
+                }
+
+                await SaveCenovnikBatchWithFallback(
+                    cenovnici,
+                    token);
+
+                ukupno += cenovnici.Count;
+                offset += cenovnici.Count;
+
+                LogAction?.Invoke(
+                    $"CENOVNIK paket {paket}: " +
+                    $"{cenovnici.Count} redova. " +
+                    $"Ukupno: {ukupno}.");
+            }
+
+            LogAction?.Invoke(
+                $"CENOVNIK - prenos završen. " +
+                $"Ukupno novih redova: {ukupno}.");
+        }
+
+        private async Task SaveCenovnikToTmpTable(List<Cenovnik> cenovnici, CancellationToken token)
+        {
+            await using var connection = new SqlConnection(connectionStrings.Transfer);
+
+            await connection.OpenAsync(token);
+
+            await using var transaction = await connection.BeginTransactionAsync(token);
+
+            try
+            {
+                await ClearCenovnikTmp(connection, (SqlTransaction)transaction, token);
+
+                await BulkInsertCenovnikTmp(connection, (SqlTransaction)transaction, cenovnici, token);
+
+                await InsertCenovnik(connection, (SqlTransaction)transaction, token);
+
+                await transaction.CommitAsync(token);
+            }
+            catch
+            {
+                await transaction.RollbackAsync(token);
+                throw;
+            }
         }
     }
 }

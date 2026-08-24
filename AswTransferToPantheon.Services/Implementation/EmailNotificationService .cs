@@ -20,44 +20,69 @@ public sealed class EmailNotificationService : IEmailNotificationService
 
     public Task SendTestEmail(CancellationToken token)
     {
-        return SendEmail(configuration.Subject,
-                BuildBody(
-                    "Startup test",
-                    "-",
-                    "-",
-                    "ASW Transfer aplikacija je pokrenuta.",
-                    "-",
-                    "-"),
-                token);
+        if (!TryGetNotification(
+                "Startup.Test",
+                out var notification))
+        {
+            return Task.CompletedTask;
         }
+
+        var body = BuildBody(
+            "Startup test",
+            "-",
+            "-",
+            "ASW Transfer aplikacija je pokrenuta.",
+            "-",
+            "-");
+
+        return SendEmail(
+            notification.Subject,
+            body,
+            notification.To,
+            notification.Cc,
+            token);
+    }
 
     public Task SendBadRecordsSummaryEmail(string groupName, string taskName, List<BadRecordInfo> badRecords, CancellationToken token)
     {
-        if (!configuration.SendOnBadRecord || badRecords.Count == 0)
+        if (badRecords.Count == 0)
         {
             return Task.CompletedTask;
         }
 
-        var subject = $"{configuration.Subject} - neispravni redovi - {taskName}";
+        var notificationKey =
+            $"{taskName}.BadRecords";
 
-        var body = BuildBadRecordsSummaryBody(groupName, taskName, badRecords);
+        if (!TryGetNotification(
+                notificationKey,
+                out var notification))
+        {
+            return Task.CompletedTask;
+        }
 
-        return SendEmail(subject, body, token);
+        var subject = notification.Subject;
+
+        var body = BuildBadRecordsSummaryBody(
+            groupName,
+            taskName,
+            badRecords);
+
+        return SendEmail(
+            subject,
+            body,
+            notification.To,
+            notification.Cc,
+            token);
     }
 
-    public Task SendTaskErrorEmail(
-        string groupName,
-        string taskName,
-        string message,
-        Exception exception,
-        CancellationToken token)
+    public Task SendTaskErrorEmail(string groupName, string taskName, string message, Exception exception, CancellationToken token, string notificationKey = "Task.Error")
     {
-        if (!configuration.SendOnTaskError)
+        if (!TryGetNotification(
+                notificationKey,
+                out var notification))
         {
             return Task.CompletedTask;
         }
-
-        var subject = $"{configuration.Subject} - greška taska - {taskName}";
 
         var body = BuildBody(
             taskName,
@@ -67,46 +92,56 @@ public sealed class EmailNotificationService : IEmailNotificationService
             exception.ToString(),
             "-");
 
-        return SendEmail(subject, body, token);
+        return SendEmail(
+            notification.Subject,
+            body,
+            notification.To,
+            notification.Cc,
+            token);
     }
 
-    private async Task SendEmail(string subject, string body, CancellationToken token)
+    private async Task SendEmail(string subject, string body, List<string> recipients, List<string> ccRecipients,
+    CancellationToken token)
     {
-        if (!configuration.Enabled)
+        if (!configuration.Enabled ||
+            recipients.Count == 0)
         {
             return;
         }
 
-        if (configuration.To.Count == 0)
+        using var mailMessage = new MailMessage
         {
-            return;
-        }
+            From = new MailAddress(configuration.From),
+            Subject = subject,
+            Body = body,
+            IsBodyHtml = true
+        };
 
-        using var mailMessage = new MailMessage();
-
-        mailMessage.From = new MailAddress(configuration.From);
-
-        foreach (var recipient in configuration.To.Where(x => !string.IsNullOrWhiteSpace(x)))
+        foreach (var recipient in recipients
+            .Where(x => !string.IsNullOrWhiteSpace(x)))
         {
             mailMessage.To.Add(recipient);
         }
 
-        foreach (var cc in configuration.Cc.Where(x => !string.IsNullOrWhiteSpace(x)))
+        foreach (var cc in ccRecipients
+            .Where(x => !string.IsNullOrWhiteSpace(x)))
         {
             mailMessage.CC.Add(cc);
         }
 
-        mailMessage.Subject = subject;
-        mailMessage.Body = body;
-        mailMessage.IsBodyHtml = true;
-
-        using var smtpClient = new SmtpClient(configuration.SmtpHost, configuration.SmtpPort)
+        using var smtpClient = new SmtpClient(
+            configuration.SmtpHost,
+            configuration.SmtpPort)
         {
             EnableSsl = configuration.EnableSsl,
-            Credentials = new NetworkCredential(configuration.UserName, configuration.Password)
+            Credentials = new NetworkCredential(
+                configuration.UserName,
+                configuration.Password)
         };
 
-        await smtpClient.SendMailAsync(mailMessage, token);
+        await smtpClient.SendMailAsync(
+            mailMessage,
+            token);
     }
 
     private string BuildBadRecordsSummaryBody(string groupName, string taskName, List<BadRecordInfo> badRecords)
@@ -178,5 +213,160 @@ public sealed class EmailNotificationService : IEmailNotificationService
             .Replace("{{Message}}", HtmlEncoder.Default.Encode(message))
             .Replace("{{Data}}", HtmlEncoder.Default.Encode(data))
             .Replace("{{Exception}}", HtmlEncoder.Default.Encode(exception));
+    }
+
+    public Task SendCreatedArticlesSummaryEmail(
+    string groupName,
+    string taskName,
+    List<CreatedArticleInfo> articles,
+    CancellationToken token)
+    {
+        if (articles.Count == 0)
+        {
+            return Task.CompletedTask;
+        }
+
+        if (!TryGetNotification(
+                "Artikli.Created",
+                out var notification))
+        {
+            return Task.CompletedTask;
+        }
+
+        var subject = notification.Subject;
+
+        var body = BuildCreatedArticlesSummaryBody(groupName, taskName, articles);
+
+        return SendEmail(subject, body, notification.To, notification.Cc, token);
+    }
+
+    private bool TryGetNotification(
+    string notificationKey,
+    out TransferEmailConfiguration notification)
+    {
+        notification = null!;
+
+        if (!configuration.Enabled)
+        {
+            return false;
+        }
+
+        if (!configuration.Notifications.TryGetValue(
+                notificationKey,
+                out var foundNotification))
+        {
+            return false;
+        }
+
+        if (!foundNotification.Enabled ||
+            foundNotification.To.Count == 0)
+        {
+            return false;
+        }
+
+        notification = foundNotification;
+        return true;
+    }
+    private string BuildCreatedArticlesSummaryBody(string groupName, string taskName, List<CreatedArticleInfo> articles)
+    {
+        var builder = new StringBuilder();
+
+        builder.AppendLine("<html><body>");
+        builder.AppendLine("<h3>Kreirani su sledeći artikli:</h3>");
+
+        builder.AppendLine(
+            $"<p><b>Transfer:</b> " +
+            $"{HtmlEncoder.Default.Encode(taskName)}</p>");
+
+        builder.AppendLine(
+            $"<p><b>Ukupno:</b> {articles.Count}</p>");
+
+        builder.AppendLine(
+            "<table border='1' cellpadding='5' cellspacing='0'>");
+
+        builder.AppendLine(
+            "<tr><th>Šifra</th><th>Naziv</th><th>Vrsta</th></tr>");
+
+        foreach (var article in articles)
+        {
+            builder.AppendLine("<tr>");
+
+            builder.AppendLine(
+                $"<td>{HtmlEncoder.Default.Encode(article.AcIdent)}</td>");
+
+            builder.AppendLine(
+                $"<td>{HtmlEncoder.Default.Encode(article.AcName)}</td>");
+
+            builder.AppendLine(
+                $"<td>{HtmlEncoder.Default.Encode(article.AcClassif)}</td>");
+
+            builder.AppendLine("</tr>");
+        }
+
+        builder.AppendLine("</table>");
+        builder.AppendLine("</body></html>");
+
+        return builder.ToString();
+    }
+
+    public Task SendCreatedDocumentsSummaryEmail(string groupName, string taskName, List<CreatedDocumentInfo> documents, CancellationToken token)
+    {
+        if (documents.Count == 0)
+        {
+            return Task.CompletedTask;
+        }
+
+        if (!TryGetNotification("Dokumenti.Created", out var notification))
+        {
+            return Task.CompletedTask;
+        }
+
+        var subject = notification.Subject;
+
+        var body = BuildCreatedDocumentsSummaryBody(groupName, taskName, documents);
+
+        return SendEmail(subject, body, notification.To, notification.Cc, token);
+    }
+
+    private string BuildCreatedDocumentsSummaryBody(string groupName, string taskName, List<CreatedDocumentInfo> documents)
+    {
+        var builder = new StringBuilder();
+
+        builder.AppendLine("<html><body>");
+        builder.AppendLine("<h3>Kreirani su sledeći dokumenti:</h3>");
+
+        builder.AppendLine($"<p><b>Transfer:</b> " + $"{HtmlEncoder.Default.Encode(taskName)}</p>");
+
+        builder.AppendLine($"<p><b>Broj vrsta dokumenata:</b> " + $"{documents.Count}</p>");
+
+        builder.AppendLine("<table border='1' cellpadding='5' cellspacing='0'>");
+
+        builder.AppendLine(
+            "<tr>" +
+            "<th>Vrsta dokumenta</th>" +
+            "<th>Naziv vrste</th>" +
+            "<th>Broj od</th>" +
+            "<th>Broj do</th>" +
+            "</tr>");
+
+        foreach (var document in documents)
+        {
+            builder.AppendLine("<tr>");
+
+            builder.AppendLine($"<td>{HtmlEncoder.Default.Encode(document.AcDocType)}</td>");
+
+            builder.AppendLine($"<td>{HtmlEncoder.Default.Encode(document.DocumentName)}</td>");
+
+            builder.AppendLine($"<td>{document.NumberFrom}</td>");
+
+            builder.AppendLine($"<td>{document.NumberTo}</td>");
+
+            builder.AppendLine("</tr>");
+        }
+
+        builder.AppendLine("</table>");
+        builder.AppendLine("</body></html>");
+
+        return builder.ToString();
     }
 }

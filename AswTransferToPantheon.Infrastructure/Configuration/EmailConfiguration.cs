@@ -27,4 +27,6 @@ public sealed class EmailConfiguration
     public bool SendOnBadRecord { get; set; } = true;
 
     public bool SendOnTaskError { get; set; } = true;
+
+    public Dictionary<string, TransferEmailConfiguration> Notifications { get; set; } = [];
 }
