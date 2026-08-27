@@ -11,4 +11,5 @@ public interface IEmailNotificationService
     Task SendTaskErrorEmail(string groupName, string taskName, string message, Exception exception, CancellationToken token, string notificationKey = "Task.Error");
     Task SendCreatedArticlesSummaryEmail(string groupName, string taskName, List<CreatedArticleInfo> articles, CancellationToken token);
     Task SendCreatedDocumentsSummaryEmail(string groupName, string taskName, List<CreatedDocumentInfo> documents, CancellationToken token);
+    Task SendDocumentCreationErrorsSummaryEmail(string groupName, string taskName, List<BadRecordInfo> errors, CancellationToken token);
 }

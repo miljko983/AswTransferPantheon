@@ -13,14 +13,18 @@ public sealed class DocumentCreationService_CL_WMS : IDocumentCreationService_CL
 
     public Action<string>? LogAction { get; set; }
     public Action<CreatedDocumentInfo>? CreatedDocumentAction { get; set; }
+    public Action<BadRecordInfo>? CreationErrorAction { get; set; }
 
     public DocumentCreationService_CL_WMS(IOptions<ConnectionStrings> connectionStrings)
     {
         this.connectionStrings = connectionStrings.Value;
     }
 
-    public async Task Execute(string? orgJedLike, bool usePriceCalculation, int? maxDocuments, CancellationToken token)
+    public async Task Execute(string? orgJedLike, bool usePriceCalculation, int? maxDocuments,
+    CancellationToken token)
     {
+        Guid? runId = null;
+
         LogAction?.Invoke("Kreiranje CL_WMS dokumenata - počinje...");
 
         await using var connection = new SqlConnection(connectionStrings.Transfer);
@@ -33,7 +37,7 @@ public sealed class DocumentCreationService_CL_WMS : IDocumentCreationService_CL
 
         command.CommandType = CommandType.StoredProcedure;
 
-        command.CommandTimeout = 600;
+        command.CommandTimeout = 2000;
 
         command.Parameters.Add("@OrgJedLike", SqlDbType.NVarChar, 20).Value = (object?)orgJedLike ?? DBNull.Value;
 
@@ -43,24 +47,21 @@ public sealed class DocumentCreationService_CL_WMS : IDocumentCreationService_CL
 
         await using var reader = await command.ExecuteReaderAsync(token);
 
-
-        /* PRVI RESULT SET - ZBIRNI REZULTAT */
-
         if (await reader.ReadAsync(token))
         {
-            var successfulOrdinal = reader.GetOrdinal("UspesnoKreirano");
+            var runIdOrdinal = reader.GetOrdinal("RunID");
 
-            var failedOrdinal = reader.GetOrdinal("NeuspesnoKreirano");
+            if (!reader.IsDBNull(runIdOrdinal))
+            {
+                runId = reader.GetGuid(runIdOrdinal);
+            }
 
-            var successful = reader.IsDBNull(successfulOrdinal) ? 0 : reader.GetInt32(successfulOrdinal);
+            var successful = reader.IsDBNull(reader.GetOrdinal("UspesnoKreirano")) ? 0 : reader.GetInt32(reader.GetOrdinal("UspesnoKreirano"));
 
-            var failed = reader.IsDBNull(failedOrdinal) ? 0 : reader.GetInt32(failedOrdinal);
+            var failed = reader.IsDBNull(reader.GetOrdinal("NeuspesnoKreirano"))? 0 : reader.GetInt32(reader.GetOrdinal("NeuspesnoKreirano"));
 
             LogAction?.Invoke($"Kreiranje CL_WMS dokumenata - završeno. " + $"Uspešno: {successful}, neuspešno: {failed}.");
         }
-
-
-        /* DRUGI RESULT SET - KREIRANI DOKUMENTI */
 
         if (await reader.NextResultAsync(token))
         {
@@ -74,34 +75,78 @@ public sealed class DocumentCreationService_CL_WMS : IDocumentCreationService_CL
 
             while (await reader.ReadAsync(token))
             {
-                var documentInfo =
-                    new CreatedDocumentInfo
+                CreatedDocumentAction?.Invoke(new CreatedDocumentInfo
                     {
-                        AcDocType =
-                            reader.IsDBNull(docTypeOrdinal)
-                                ? string.Empty
-                                : reader.GetValue(docTypeOrdinal)?
-                                    .ToString()
-                                    ?? string.Empty,
+                        AcDocType = reader.IsDBNull(docTypeOrdinal) ? string.Empty : reader.GetValue(docTypeOrdinal) ?.ToString() ?? string.Empty,
 
-                        DocumentName =
-                            reader.IsDBNull(documentNameOrdinal)
-                                ? string.Empty
-                                : reader.GetValue(documentNameOrdinal)?
-                                    .ToString()
-                                    ?? string.Empty,
+                        DocumentName = reader.IsDBNull(documentNameOrdinal) ? string.Empty : reader.GetValue(documentNameOrdinal) ?.ToString() ?? string.Empty,
 
-                        NumberFrom = reader.IsDBNull(numberFromOrdinal)
-                            ? string.Empty
-                            : reader.GetValue(numberFromOrdinal)?.ToString() ?? string.Empty,
+                        NumberFrom = reader.IsDBNull(numberFromOrdinal) ? string.Empty : reader.GetValue(numberFromOrdinal) ?.ToString() ?? string.Empty,
 
-                        NumberTo = reader.IsDBNull(numberToOrdinal)
-                            ? string.Empty
-                            : reader.GetValue(numberToOrdinal)?.ToString() ?? string.Empty
-                    };
-
-                CreatedDocumentAction?.Invoke(documentInfo);
+                        NumberTo = reader.IsDBNull(numberToOrdinal) ? string.Empty : reader.GetValue(numberToOrdinal) ?.ToString() ?? string.Empty
+                    });
             }
+        }
+
+        await reader.DisposeAsync();
+
+        if (runId.HasValue)
+        {
+            await ReadCreationErrors(connection, runId.Value, token);
+        }
+    }
+
+    private async Task ReadCreationErrors(SqlConnection connection, Guid runId, CancellationToken token)
+    {
+        await using var command = connection.CreateCommand();
+
+        command.CommandText = """
+        SELECT
+            VLPZaglavljeID,
+            OrgJed,
+            Dokument,
+            Broj,
+            DatumDokumenta,
+            ACKey,
+            Poruka,
+            Detalji
+        FROM dbo._tb_GreskeKreiranjaDokumenata_CLWMS
+        WHERE RunID = @RunID
+        ORDER BY VLPZaglavljeID;
+        """;
+
+        command.Parameters.Add(
+            "@RunID",
+            SqlDbType.UniqueIdentifier).Value = runId;
+
+        await using var reader =
+            await command.ExecuteReaderAsync(token);
+
+        while (await reader.ReadAsync(token))
+        {
+            var vlpId = reader["VLPZaglavljeID"]?.ToString() ?? string.Empty;
+            var orgJed = reader["OrgJed"]?.ToString() ?? string.Empty;
+            var dokument = reader["Dokument"]?.ToString() ?? string.Empty;
+            var broj = reader["Broj"]?.ToString() ?? string.Empty;
+            var datum = reader["DatumDokumenta"]?.ToString() ?? string.Empty;
+            var acKey = reader["ACKey"]?.ToString() ?? string.Empty;
+            var poruka = reader["Poruka"]?.ToString() ?? string.Empty;
+            var detalji = reader["Detalji"]?.ToString() ?? string.Empty;
+
+            CreationErrorAction?.Invoke(
+                new BadRecordInfo
+                {
+                    TableName = "KreiranjeDokumenata_CL_WMS",
+                    Key = $"VLP ID={vlpId}; ACKey={acKey}",
+                    Message = poruka,
+                    Data =
+                        $"OrgJed={orgJed}; " +
+                        $"Dokument={dokument}; " +
+                        $"Broj={broj}; " +
+                        $"Datum={datum}",
+                    Exception = detalji
+                }
+            );
         }
     }
 }

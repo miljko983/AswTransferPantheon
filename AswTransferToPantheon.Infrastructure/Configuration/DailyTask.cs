@@ -15,4 +15,5 @@ public sealed class DailyTask
     public List<TaskType> ParallelTasks { get; set; } = [];
 
     public List<TaskType> Tasks { get; set; } = [];
+    public bool ExecuteDocumentCreation { get; set; } = false;
 }

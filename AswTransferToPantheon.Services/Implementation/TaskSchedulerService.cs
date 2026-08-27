@@ -374,12 +374,12 @@ namespace AswTransferToPantheon.Services.Implementation
 
             foreach (var task in dailyTask.Tasks)
             {
-                await GetTask(task, batchSize, groupName);
+                await GetTask(task, batchSize, groupName, 0, dailyTask.ExecuteDocumentCreation);
             }
 
             foreach (var task in dailyTask.ParallelTasks)
             {
-                await GetTask(task, batchSize, groupName);
+                await GetTask(task, batchSize, groupName, 0, dailyTask.ExecuteDocumentCreation);
             }
         }
 
@@ -395,19 +395,14 @@ namespace AswTransferToPantheon.Services.Implementation
             return nextTime;
         }
 
-        private Task GetTask(TaskType type, int batchSize, string groupName, int daysBack = 0)
+        private Task GetTask(TaskType type, int batchSize, string groupName, int daysBack = 0, bool executeDocumentCreation = false)
         {
             switch (type)
             {
-                case TaskType.Artikli:
-                    return TransferArtikli(batchSize, groupName, nameof(TaskType.Artikli));
-
-                case TaskType.Kif:
-                    return TransferKif(batchSize, groupName, nameof(TaskType.Kif));
-                case TaskType.VLPIzvSve:
-                    return TransferVlpIzvSve(batchSize,  daysBack,  groupName,  nameof(TaskType.VLPIzvSve));
-                default:
-                    return Task.CompletedTask;
+                case TaskType.Artikli: return TransferArtikli(batchSize, groupName, nameof(TaskType.Artikli), executeDocumentCreation);
+                case TaskType.Kif: return TransferKif(batchSize, groupName, nameof(TaskType.Kif));
+                case TaskType.VLPIzvSve: return TransferVlpIzvSve(batchSize,  daysBack,  groupName,  nameof(TaskType.VLPIzvSve));
+                default: return Task.CompletedTask;
             }
         }
 
@@ -464,7 +459,7 @@ namespace AswTransferToPantheon.Services.Implementation
                 throw;
             }
         }
-        private async Task TransferArtikli(int batchSize, string groupName, string taskName)
+        private async Task TransferArtikli(int batchSize, string groupName, string taskName, bool executeDocumentCreation)
         {
             var badRecords = new List<BadRecordInfo>();
             var createdArticles = new List<CreatedArticleInfo>();
@@ -509,6 +504,32 @@ namespace AswTransferToPantheon.Services.Implementation
                 await artikliTransferService.TransferArtikliPaket(
                     batchSize,
                     cancellationTokenSource.Token);
+                if (badRecords.Count == 0)
+                {
+                    transferFileLogger.Info(
+                        groupName,
+                        "KreiranjeDokumenata_CL_WMS",
+                        "Artikli i cenovnik su završeni. Počinje kreiranje CL_WMS dokumenata.");
+
+                    if (executeDocumentCreation && badRecords.Count == 0)
+                    {
+                        await ExecuteKreiranjeDokumenataClWms(groupName);
+                    }
+                    else if (!executeDocumentCreation)
+                    {
+                        transferFileLogger.Info(
+                            groupName,
+                            "KreiranjeDokumenata_CL_WMS",
+                            "Kreiranje CL_WMS dokumenata je isključeno u konfiguraciji.");
+                    }
+                }
+                else
+                {
+                    transferFileLogger.Info(
+                        groupName,
+                        "KreiranjeDokumenata_CL_WMS",
+                        "Kreiranje dokumenata je preskočeno jer postoje neispravni redovi u transferu artikala.");
+                }
 
                 if (createdArticles.Count > 0)
                 {
@@ -660,6 +681,8 @@ namespace AswTransferToPantheon.Services.Implementation
 
             var createdDocuments = new List<CreatedDocumentInfo>();
 
+            var creationErrors = new List<BadRecordInfo>();
+
             documentCreationService_CL_WMS.LogAction = CreateLogAction(groupName, taskName);
 
             documentCreationService_CL_WMS.CreatedDocumentAction =
@@ -668,11 +691,24 @@ namespace AswTransferToPantheon.Services.Implementation
                     createdDocuments.Add(document);
                 };
 
-            await documentCreationService_CL_WMS.Execute(orgJedLike: null, usePriceCalculation: true, maxDocuments: 1000, token: cancellationTokenSource.Token);
+            documentCreationService_CL_WMS.CreationErrorAction =
+                error =>
+                {
+                    creationErrors.Add(error);
+
+                    transferFileLogger.BadRecord(groupName, taskName, error.TableName, error.Key, error.Data, new InvalidOperationException(error.Exception));
+                };
+
+            await documentCreationService_CL_WMS.Execute(orgJedLike: null, usePriceCalculation: true, maxDocuments: 2000, token: cancellationTokenSource.Token);
 
             if (createdDocuments.Count > 0)
             {
                 await emailNotificationService.SendCreatedDocumentsSummaryEmail(groupName, taskName, createdDocuments, cancellationTokenSource.Token);
+            }
+
+            if (creationErrors.Count > 0)
+            {
+                await emailNotificationService.SendDocumentCreationErrorsSummaryEmail(groupName, taskName, creationErrors, cancellationTokenSource.Token);
             }
         }
 
@@ -698,38 +734,16 @@ namespace AswTransferToPantheon.Services.Implementation
 
             try
             {
-                transferFileLogger.Info(
-                    groupName,
-                    taskName,
-                    $"START {taskName}. " +
-                    $"BatchSize: {batchSize}, DaysBack: {daysBack}");
+                transferFileLogger.Info(groupName, taskName, $"START {taskName}. " + $"BatchSize: {batchSize}, DaysBack: {daysBack}");
 
-                await vlpIzvSveTransferService.Transfer(
-                    batchSize,
-                    daysBack,
-                    cancellationTokenSource.Token);
+                await vlpIzvSveTransferService.Transfer(batchSize, daysBack, cancellationTokenSource.Token);
 
                 if (badRecords.Count > 0)
                 {
-                    await emailNotificationService.SendBadRecordsSummaryEmail(
-                        groupName,
-                        taskName,
-                        badRecords,
-                        cancellationTokenSource.Token);
-                }
-                if (badRecords.Count == 0)
-                {
-                    await ExecuteKreiranjeDokumenataClWms(groupName);
-                }
-                else
-                {
-                    transferFileLogger.Info(groupName, "KreiranjeDokumenata_CL_WMS", "Kreiranje dokumenata je preskočeno jer VLP transfer ima neispravne redove.");
-                }
+                    await emailNotificationService.SendBadRecordsSummaryEmail(groupName, taskName, badRecords, cancellationTokenSource.Token);
+                }                
 
-                transferFileLogger.Info(
-                    groupName,
-                    taskName,
-                    $"END {taskName}.");
+                transferFileLogger.Info(groupName, taskName, $"END {taskName}.");
             }
             catch (Exception exception)
             {
@@ -739,15 +753,9 @@ namespace AswTransferToPantheon.Services.Implementation
                         $"Kritična greška u tasku {taskName}. " +
                         "Trenutno izvršavanje se prekida do sledećeg zakazanog termina.";
 
-                    await LogCritical(
-                        groupName,
-                        taskName,
-                        message,
-                        exception);
+                    await LogCritical(groupName, taskName, message, exception);
 
-                    throw new CriticalTransferException(
-                        message,
-                        exception);
+                    throw new CriticalTransferException(message, exception);
                 }
 
                 throw;

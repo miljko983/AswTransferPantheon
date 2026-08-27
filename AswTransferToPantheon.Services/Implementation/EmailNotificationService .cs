@@ -369,4 +369,21 @@ public sealed class EmailNotificationService : IEmailNotificationService
 
         return builder.ToString();
     }
+
+    public Task SendDocumentCreationErrorsSummaryEmail(string groupName, string taskName, List<BadRecordInfo> errors, CancellationToken token)
+    {
+        if (errors.Count == 0)
+        {
+            return Task.CompletedTask;
+        }
+
+        if (!TryGetNotification("Dokumenti.CreationErrors", out var notification))
+        {
+            return Task.CompletedTask;
+        }
+
+        var body = BuildBadRecordsSummaryBody(groupName, taskName, errors);
+
+        return SendEmail(notification.Subject, body, notification.To, notification.Cc, token);
+    }
 }
