@@ -21,6 +21,7 @@ namespace AswTransferToPantheon.Services.Implementation
         private readonly IEmailNotificationService emailNotificationService;
         private readonly IVlpIzvSveTransferService vlpIzvSveTransferService;
         private readonly IDocumentCreationService_CL_WMS documentCreationService_CL_WMS;
+        private readonly INaloziTransferService naloziTransferService;
         public Action<string> LogAction { get; set; }
 
         public Action<Exception, string> LogErrorAction { get; set; }
@@ -29,6 +30,7 @@ namespace AswTransferToPantheon.Services.Implementation
                                     IKifTransferService kifTransferService,
                                     IArtikliTransferService artikliTransferService,
                                     IVlpIzvSveTransferService vlpIzvSveTransferService,
+                                    INaloziTransferService naloziTransferService,
                                     ITransferFileLogger transferFileLogger,
                                     IEmailNotificationService emailNotificationService,
                                     IDocumentCreationService_CL_WMS documentCreationService_CL_WMS)
@@ -37,6 +39,7 @@ namespace AswTransferToPantheon.Services.Implementation
             this.kifTransferService = kifTransferService;
             this.artikliTransferService = artikliTransferService;
             this.vlpIzvSveTransferService = vlpIzvSveTransferService;
+            this.naloziTransferService = naloziTransferService;
             this.transferFileLogger = transferFileLogger;
             this.emailNotificationService = emailNotificationService;
             this.documentCreationService_CL_WMS = documentCreationService_CL_WMS;
@@ -46,6 +49,7 @@ namespace AswTransferToPantheon.Services.Implementation
         {
             _ = ScheduleDailyTasks(schedulerConfiguration.Value.DailyTasks);
             _ = SchedulePeriodicTasks(schedulerConfiguration.Value.PeriodicTasks);
+            _ = ScheduleNaloziTasks(schedulerConfiguration.Value.NaloziTasks);
             return Task.CompletedTask;
         }
 
@@ -128,6 +132,82 @@ namespace AswTransferToPantheon.Services.Implementation
                 if (!cancellationTokenSource.IsCancellationRequested)
                 {
                     _ = SchedulePeriodicTask(pt, false);
+                }
+            }
+        }
+
+        private Task ScheduleNaloziTasks(List<NaloziTaskConfiguration> naloziTasks)
+        {
+            LogAction?.Invoke($"Scheduling Nalozi tasks. Count: {naloziTasks.Count}.");
+
+            foreach (var naloziTask in naloziTasks)
+            {
+                _ = ScheduleNaloziTask(naloziTask, true);
+            }
+
+            LogAction?.Invoke("Nalozi tasks scheduled.");
+
+            return Task.CompletedTask;
+        }
+
+        private async Task ScheduleNaloziTask(NaloziTaskConfiguration naloziTask, bool firstCall)
+        {
+            if (cancellationTokenSource.IsCancellationRequested)
+            {
+                return;
+            }
+
+            var groupName = Path.Combine("NaloziTasks", naloziTask.Name);
+
+            DateTime nextTime;
+
+            if (firstCall && naloziTask.ExecuteOnStartup)
+            {
+                nextTime = DateTime.Now;
+            }
+            else
+            {
+                nextTime = GetPeriodicStartTime(naloziTask.Start, naloziTask.End, naloziTask.PeriodInMinutes);
+            }
+
+            try
+            {
+                var difference = nextTime.Subtract(DateTime.Now);
+
+                transferFileLogger.Info(groupName, "Scheduler", $"Scheduled Nalozi task {naloziTask.Name} for {nextTime}.");
+
+                await Task.Delay(difference, cancellationTokenSource.Token);
+
+                transferFileLogger.Info(groupName, "Scheduler", $"Executing Nalozi task {naloziTask.Name}.");
+
+                await TransferNalozi(naloziTask);
+
+                transferFileLogger.Info(groupName, "Scheduler", $"Executed Nalozi task {naloziTask.Name}.");
+            }
+            catch (OperationCanceledException)
+            {
+                transferFileLogger.Info(groupName, "Scheduler", $"Nalozi task {naloziTask.Name} cancelled.");
+            }
+            catch (CriticalTransferException)
+            {
+                transferFileLogger.Info(groupName, "Scheduler", $"Nalozi task {naloziTask.Name} stopped بسبب critical error.");
+            }
+            catch (Exception exception)
+            {
+                if (TransferErrorHelper.IsCriticalError(exception))
+                {
+                    await LogCritical(groupName, naloziTask.Name, $"Critical error executing Nalozi task {naloziTask.Name}.", exception);
+                }
+                else
+                {
+                    LogError(groupName, naloziTask.Name, $"Error executing Nalozi task {naloziTask.Name}.", exception);
+                }
+            }
+            finally
+            {
+                if (!cancellationTokenSource.IsCancellationRequested)
+                {
+                    _ = ScheduleNaloziTask(naloziTask, false);
                 }
             }
         }
@@ -403,6 +483,70 @@ namespace AswTransferToPantheon.Services.Implementation
                 case TaskType.Kif: return TransferKif(batchSize, groupName, nameof(TaskType.Kif));
                 case TaskType.VLPIzvSve: return TransferVlpIzvSve(batchSize,  daysBack,  groupName,  nameof(TaskType.VLPIzvSve));
                 default: return Task.CompletedTask;
+            }
+        }
+
+        private async Task TransferNalozi(NaloziTaskConfiguration naloziTask)
+        {
+            var groupName = Path.Combine("NaloziTasks", naloziTask.Name);
+
+            var taskName = naloziTask.Name;
+
+            var badRecords = new List<BadRecordInfo>();
+
+            naloziTransferService.LogAction = CreateLogAction(groupName, taskName);
+
+            naloziTransferService.BadRecordAction =
+                (table, key, data, message, exception) =>
+                {
+                    transferFileLogger.BadRecord(
+                        groupName,
+                        taskName,
+                        table,
+                        key,
+                        data,
+                        exception);
+
+                    badRecords.Add(new BadRecordInfo
+                    {
+                        TableName = table,
+                        Key = key,
+                        Data = data,
+                        Message = message,
+                        Exception = exception.Message
+                    });
+                };
+
+            try
+            {
+                transferFileLogger.Info(
+                    groupName,
+                    taskName,
+                    $"START {taskName}. " +
+                    $"BatchSize: {naloziTask.BatchSize}, " +
+                    $"DatumOd: {naloziTask.DateFrom:yyyy-MM-dd}");
+
+                await naloziTransferService.Transfer(naloziTask.BatchSize, naloziTask.DateFrom, cancellationTokenSource.Token);
+
+                if (badRecords.Count > 0)
+                {
+                    await emailNotificationService.SendBadRecordsSummaryEmail(groupName, taskName, badRecords, cancellationTokenSource.Token);
+                }
+
+                transferFileLogger.Info(groupName, taskName, $"END {taskName}.");
+            }
+            catch (Exception exception)
+            {
+                if (TransferErrorHelper.IsCriticalError(exception))
+                {
+                    var message = $"Kritična greška u tasku {taskName}. " + "Trenutno izvršavanje se prekida do sledećeg termina.";
+
+                    await LogCritical(groupName, taskName, message, exception);
+
+                    throw new CriticalTransferException(message, exception);
+                }
+
+                throw;
             }
         }
 
@@ -761,5 +905,7 @@ namespace AswTransferToPantheon.Services.Implementation
                 throw;
             }
         }
+       
+
     }
 }

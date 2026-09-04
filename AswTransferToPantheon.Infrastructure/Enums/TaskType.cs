@@ -8,6 +8,7 @@
         Barkodovi,
         RobneGrupe,
         Kif,
-        VLPIzvSve
+        VLPIzvSve,
+        Nalozi
     }
 }

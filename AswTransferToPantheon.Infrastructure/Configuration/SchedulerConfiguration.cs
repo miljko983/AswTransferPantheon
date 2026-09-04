@@ -5,4 +5,6 @@ public sealed class SchedulerConfiguration
     public List<DailyTask> DailyTasks { get; set; } = [];
 
     public List<PeriodicTask> PeriodicTasks { get; set; } = [];
+
+    public List<NaloziTaskConfiguration> NaloziTasks { get; set; } = [];
 }
