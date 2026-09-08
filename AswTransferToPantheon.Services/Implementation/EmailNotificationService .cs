@@ -386,4 +386,89 @@ public sealed class EmailNotificationService : IEmailNotificationService
 
         return SendEmail(notification.Subject, body, notification.To, notification.Cc, token);
     }
+
+    public Task SendCreatedIdentiCentrosinergijaSummaryEmail(
+    string groupName,
+    string taskName,
+    List<CreatedIdentCentrosinergijaInfo> identi,
+    CancellationToken token)
+    {
+        if (identi.Count == 0)
+        {
+            return Task.CompletedTask;
+        }
+
+        if (!TryGetNotification(
+                "KreiranjeIdenata.Created",
+                out var notification))
+        {
+            return Task.CompletedTask;
+        }
+
+        var body =
+            BuildCreatedIdentiCentrosinergijaSummaryBody(
+                groupName,
+                taskName,
+                identi);
+
+        return SendEmail(
+            notification.Subject,
+            body,
+            notification.To,
+            notification.Cc,
+            token);
+    }
+
+    private string BuildCreatedIdentiCentrosinergijaSummaryBody(
+        string groupName,
+        string taskName,
+        List<CreatedIdentCentrosinergijaInfo> identi)
+    {
+        var builder = new StringBuilder();
+
+        builder.AppendLine("<html><body>");
+        builder.AppendLine(
+            "<h3>Kreirani su sledeći identi u CENTROSINERGIJA bazi:</h3>");
+
+        builder.AppendLine(
+            $"<p><b>Transfer:</b> " +
+            $"{HtmlEncoder.Default.Encode(taskName)}</p>");
+
+        builder.AppendLine(
+            $"<p><b>Ukupno kreiranih identa:</b> {identi.Count}</p>");
+
+        builder.AppendLine(
+            "<table border='1' cellpadding='5' cellspacing='0'>");
+
+        builder.AppendLine(
+            "<tr>" +
+            "<th>Šifra</th>" +
+            "<th>Naziv</th>" +
+            "<th>Primarna klasifikacija</th>" +
+            "<th>Sekundarna klasifikacija</th>" +
+            "<th>Vreme kreiranja</th>" +
+            "</tr>");
+
+        foreach (var ident in identi)
+        {
+            builder.AppendLine("<tr>");
+
+            builder.AppendLine($"<td>{HtmlEncoder.Default.Encode(ident.AcIdent)}</td>");
+
+            builder.AppendLine($"<td>{HtmlEncoder.Default.Encode(ident.AcName)}</td>");
+
+            builder.AppendLine($"<td>{HtmlEncoder.Default.Encode(ident.AcClassif)}</td>");
+
+            builder.AppendLine($"<td>{HtmlEncoder.Default.Encode(ident.AcClassif2)}</td>");
+
+            builder.AppendLine($"<td>{ident.CreatedAt:dd.MM.yyyy HH:mm:ss}</td>");
+
+            builder.AppendLine("</tr>");
+        }
+
+        builder.AppendLine("</table>");
+        builder.AppendLine("</body></html>");
+
+        return builder.ToString();
+    }
 }

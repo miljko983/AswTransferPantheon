@@ -7,14 +7,15 @@ using Microsoft.Extensions.Options;
 
 namespace AswTransferToPantheon.Services.Implementation;
 
-public sealed class CentrosinergijaKreiranjeIdenataService
-    : ICentrosinergijaKreiranjeIdenataService
+public sealed class CentrosinergijaKreiranjeIdenataService : ICentrosinergijaKreiranjeIdenataService
 {
     private readonly ConnectionStrings connectionStrings;
 
     public Action<string>? LogAction { get; set; }
 
     public Action<BadRecordInfo>? ErrorAction { get; set; }
+
+    public Action<CreatedIdentCentrosinergijaInfo>? CreatedIdentCentrosinergijaAction { get; set; }
 
     public CentrosinergijaKreiranjeIdenataService(IOptions<ConnectionStrings> connectionStrings)
     {

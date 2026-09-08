@@ -12,4 +12,6 @@ public interface IEmailNotificationService
     Task SendCreatedArticlesSummaryEmail(string groupName, string taskName, List<CreatedArticleInfo> articles, CancellationToken token);
     Task SendCreatedDocumentsSummaryEmail(string groupName, string taskName, List<CreatedDocumentInfo> documents, CancellationToken token);
     Task SendDocumentCreationErrorsSummaryEmail(string groupName, string taskName, List<BadRecordInfo> errors, CancellationToken token);
+
+    Task SendCreatedIdentiCentrosinergijaSummaryEmail(string groupName, string taskName, List<CreatedIdentCentrosinergijaInfo> identi, CancellationToken token);
 }
