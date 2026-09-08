@@ -272,7 +272,7 @@ public sealed class EmailNotificationService : IEmailNotificationService
         var builder = new StringBuilder();
 
         builder.AppendLine("<html><body>");
-        builder.AppendLine("<h3>Kreirani su sledeći artikli:</h3>");
+        builder.AppendLine("<h3>Kreirani su sledeći artikli u CL_WMS bazi:</h3>");
 
         builder.AppendLine(
             $"<p><b>Transfer:</b> " +
