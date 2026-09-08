@@ -206,70 +206,149 @@ public sealed class CentrosinergijaKreiranjeIdenataService : ICentrosinergijaKre
 
 
         /* ============================================================
-           3. RESULT SET - USPEŠNO KREIRANI IDENTI
-           ============================================================ */
+   3. RESULT SET - USPEŠNO KREIRANI IDENTI
+   ============================================================ */
 
         if (await reader.NextResultAsync(token))
         {
-            var createdSourceIdOrdinal = reader.GetOrdinal("SourceID");
+            var sifraIdentaOrdinal =
+                reader.GetOrdinal("Sifra identa");
 
-            var createdAcIdentOrdinal = reader.GetOrdinal("AcIdent");
+            var idAswOrdinal =
+                reader.GetOrdinal("ID ASW");
 
-            var createdAcNameOrdinal = reader.GetOrdinal("AcName");
+            var batSifraOrdinal =
+                reader.GetOrdinal("BAT sifra");
 
-            var createdAcClassifOrdinal = reader.GetOrdinal("AcClassif");
+            var dobavljacOrdinal =
+                reader.GetOrdinal("Dobavljac");
 
-            var createdAcClassif2Ordinal = reader.GetOrdinal("AcClassif2");
+            var nazivDobavljacaOrdinal =
+                reader.GetOrdinal("Naziv dobavljaca");
 
-            var createdAtOrdinal = reader.GetOrdinal("CreatedAt");
+            var grupaOrdinal =
+                reader.GetOrdinal("Grupa");
+
+            var podgrupaOrdinal =
+                reader.GetOrdinal("Podgrupa");
+
+            var vrstaOrdinal =
+                reader.GetOrdinal("Vrsta");
+
+            var odeljenjeOrdinal =
+                reader.GetOrdinal("Odeljenje");
+
+            var nosiocTroskaOrdinal =
+                reader.GetOrdinal("Nosioc troska");
+
+            var kontoNvOrdinal =
+                reader.GetOrdinal("Konto NV");
+
+            var kontoPrihodOrdinal =
+                reader.GetOrdinal("Konto prihod");
+
+            var datumKreiranjaOrdinal =
+                reader.GetOrdinal("Datum kreiranja");
 
             while (await reader.ReadAsync(token))
             {
                 var createdIdent =
                     new CreatedIdentCentrosinergijaInfo
                     {
-                        SourceID =reader.IsDBNull(createdSourceIdOrdinal)
-                                ? 0
-                                : Convert.ToInt64(
-                                    reader.GetValue(
-                                        createdSourceIdOrdinal)),
-
-                        AcIdent =reader.IsDBNull(createdAcIdentOrdinal)
+                        SifraIdenta =
+                            reader.IsDBNull(sifraIdentaOrdinal)
                                 ? string.Empty
-                                : reader.GetValue(
-                                        createdAcIdentOrdinal)?
+                                : reader.GetValue(sifraIdentaOrdinal)?
                                     .ToString()
                                     ?? string.Empty,
 
-                        AcName =reader.IsDBNull(createdAcNameOrdinal)
+                        IdAsw =
+                            reader.IsDBNull(idAswOrdinal)
                                 ? string.Empty
-                                : reader.GetValue(
-                                        createdAcNameOrdinal)?
+                                : reader.GetValue(idAswOrdinal)?
                                     .ToString()
                                     ?? string.Empty,
 
-                        AcClassif =reader.IsDBNull(createdAcClassifOrdinal)
+                        BatSifra =
+                            reader.IsDBNull(batSifraOrdinal)
                                 ? string.Empty
-                                : reader.GetValue(
-                                        createdAcClassifOrdinal)?
+                                : reader.GetValue(batSifraOrdinal)?
                                     .ToString()
                                     ?? string.Empty,
 
-                        AcClassif2 =reader.IsDBNull(createdAcClassif2Ordinal)
+                        Dobavljac =
+                            reader.IsDBNull(dobavljacOrdinal)
                                 ? string.Empty
-                                : reader.GetValue(
-                                        createdAcClassif2Ordinal)?
+                                : reader.GetValue(dobavljacOrdinal)?
                                     .ToString()
                                     ?? string.Empty,
 
-                        CreatedAt =reader.IsDBNull(createdAtOrdinal)
+                        NazivDobavljaca =
+                            reader.IsDBNull(nazivDobavljacaOrdinal)
+                                ? string.Empty
+                                : reader.GetValue(nazivDobavljacaOrdinal)?
+                                    .ToString()
+                                    ?? string.Empty,
+
+                        Grupa =
+                            reader.IsDBNull(grupaOrdinal)
+                                ? string.Empty
+                                : reader.GetValue(grupaOrdinal)?
+                                    .ToString()
+                                    ?? string.Empty,
+
+                        Podgrupa =
+                            reader.IsDBNull(podgrupaOrdinal)
+                                ? string.Empty
+                                : reader.GetValue(podgrupaOrdinal)?
+                                    .ToString()
+                                    ?? string.Empty,
+
+                        Vrsta =
+                            reader.IsDBNull(vrstaOrdinal)
+                                ? string.Empty
+                                : reader.GetValue(vrstaOrdinal)?
+                                    .ToString()
+                                    ?? string.Empty,
+
+                        Odeljenje =
+                            reader.IsDBNull(odeljenjeOrdinal)
+                                ? string.Empty
+                                : reader.GetValue(odeljenjeOrdinal)?
+                                    .ToString()
+                                    ?? string.Empty,
+
+                        NosiocTroska =
+                            reader.IsDBNull(nosiocTroskaOrdinal)
+                                ? string.Empty
+                                : reader.GetValue(nosiocTroskaOrdinal)?
+                                    .ToString()
+                                    ?? string.Empty,
+
+                        KontoNv =
+                            reader.IsDBNull(kontoNvOrdinal)
+                                ? string.Empty
+                                : reader.GetValue(kontoNvOrdinal)?
+                                    .ToString()
+                                    ?? string.Empty,
+
+                        KontoPrihod =
+                            reader.IsDBNull(kontoPrihodOrdinal)
+                                ? string.Empty
+                                : reader.GetValue(kontoPrihodOrdinal)?
+                                    .ToString()
+                                    ?? string.Empty,
+
+                        DatumKreiranja =
+                            reader.IsDBNull(datumKreiranjaOrdinal)
                                 ? DateTime.MinValue
                                 : Convert.ToDateTime(
                                     reader.GetValue(
-                                        createdAtOrdinal))
+                                        datumKreiranjaOrdinal))
                     };
 
-                CreatedIdentCentrosinergijaAction?.Invoke(createdIdent);
+                CreatedIdentCentrosinergijaAction?.Invoke(
+                    createdIdent);
             }
         }
 

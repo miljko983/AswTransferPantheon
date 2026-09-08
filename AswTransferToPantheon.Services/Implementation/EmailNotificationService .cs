@@ -387,46 +387,29 @@ public sealed class EmailNotificationService : IEmailNotificationService
         return SendEmail(notification.Subject, body, notification.To, notification.Cc, token);
     }
 
-    public Task SendCreatedIdentiCentrosinergijaSummaryEmail(
-    string groupName,
-    string taskName,
-    List<CreatedIdentCentrosinergijaInfo> identi,
-    CancellationToken token)
+    public Task SendCreatedIdentiCentrosinergijaSummaryEmail(string groupName, string taskName, List<CreatedIdentCentrosinergijaInfo> identi, CancellationToken token)
     {
         if (identi.Count == 0)
         {
             return Task.CompletedTask;
         }
 
-        if (!TryGetNotification(
-                "KreiranjeIdenata.Created",
-                out var notification))
+        if (!TryGetNotification("KreiranjeIdenata.Created", out var notification))
         {
             return Task.CompletedTask;
         }
 
-        var body =
-            BuildCreatedIdentiCentrosinergijaSummaryBody(
-                groupName,
-                taskName,
-                identi);
+        var body = BuildCreatedIdentiCentrosinergijaSummaryBody(groupName, taskName, identi);
 
-        return SendEmail(
-            notification.Subject,
-            body,
-            notification.To,
-            notification.Cc,
-            token);
+        return SendEmail(notification.Subject, body, notification.To, notification.Cc, token);
     }
 
-    private string BuildCreatedIdentiCentrosinergijaSummaryBody(
-        string groupName,
-        string taskName,
-        List<CreatedIdentCentrosinergijaInfo> identi)
+    private string BuildCreatedIdentiCentrosinergijaSummaryBody(string groupName, string taskName, List<CreatedIdentCentrosinergijaInfo> identi)
     {
         var builder = new StringBuilder();
 
         builder.AppendLine("<html><body>");
+
         builder.AppendLine(
             "<h3>Kreirani su sledeći identi u CENTROSINERGIJA bazi:</h3>");
 
@@ -442,26 +425,63 @@ public sealed class EmailNotificationService : IEmailNotificationService
 
         builder.AppendLine(
             "<tr>" +
-            "<th>Šifra</th>" +
-            "<th>Naziv</th>" +
-            "<th>Primarna klasifikacija</th>" +
-            "<th>Sekundarna klasifikacija</th>" +
-            "<th>Vreme kreiranja</th>" +
+            "<th>Šifra identa</th>" +
+            "<th>ID ASW</th>" +
+            "<th>BAT šifra</th>" +
+            "<th>Dobavljač</th>" +
+            "<th>Naziv dobavljača</th>" +
+            "<th>Grupa</th>" +
+            "<th>Podgrupa</th>" +
+            "<th>Vrsta</th>" +
+            "<th>Odeljenje</th>" +
+            "<th>Nosioc troška</th>" +
+            "<th>Konto NV</th>" +
+            "<th>Konto prihod</th>" +
+            "<th>Datum kreiranja</th>" +
             "</tr>");
 
         foreach (var ident in identi)
         {
             builder.AppendLine("<tr>");
 
-            builder.AppendLine($"<td>{HtmlEncoder.Default.Encode(ident.AcIdent)}</td>");
+            builder.AppendLine(
+                $"<td>{HtmlEncoder.Default.Encode(ident.SifraIdenta)}</td>");
 
-            builder.AppendLine($"<td>{HtmlEncoder.Default.Encode(ident.AcName)}</td>");
+            builder.AppendLine(
+                $"<td>{HtmlEncoder.Default.Encode(ident.IdAsw)}</td>");
 
-            builder.AppendLine($"<td>{HtmlEncoder.Default.Encode(ident.AcClassif)}</td>");
+            builder.AppendLine(
+                $"<td>{HtmlEncoder.Default.Encode(ident.BatSifra)}</td>");
 
-            builder.AppendLine($"<td>{HtmlEncoder.Default.Encode(ident.AcClassif2)}</td>");
+            builder.AppendLine(
+                $"<td>{HtmlEncoder.Default.Encode(ident.Dobavljac)}</td>");
 
-            builder.AppendLine($"<td>{ident.CreatedAt:dd.MM.yyyy HH:mm:ss}</td>");
+            builder.AppendLine(
+                $"<td>{HtmlEncoder.Default.Encode(ident.NazivDobavljaca)}</td>");
+
+            builder.AppendLine(
+                $"<td>{HtmlEncoder.Default.Encode(ident.Grupa)}</td>");
+
+            builder.AppendLine(
+                $"<td>{HtmlEncoder.Default.Encode(ident.Podgrupa)}</td>");
+
+            builder.AppendLine(
+                $"<td>{HtmlEncoder.Default.Encode(ident.Vrsta)}</td>");
+
+            builder.AppendLine(
+                $"<td>{HtmlEncoder.Default.Encode(ident.Odeljenje)}</td>");
+
+            builder.AppendLine(
+                $"<td>{HtmlEncoder.Default.Encode(ident.NosiocTroska)}</td>");
+
+            builder.AppendLine(
+                $"<td>{HtmlEncoder.Default.Encode(ident.KontoNv)}</td>");
+
+            builder.AppendLine(
+                $"<td>{HtmlEncoder.Default.Encode(ident.KontoPrihod)}</td>");
+
+            builder.AppendLine(
+                $"<td>{ident.DatumKreiranja:dd.MM.yyyy HH:mm:ss}</td>");
 
             builder.AppendLine("</tr>");
         }
