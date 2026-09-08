@@ -21,6 +21,7 @@ namespace AswTransferToPantheon.Services.Implementation
         private readonly IEmailNotificationService emailNotificationService;
         private readonly IVlpIzvSveTransferService vlpIzvSveTransferService;
         private readonly IDocumentCreationService_CL_WMS documentCreationService_CL_WMS;
+        private readonly ICentrosinergijaKreiranjeIdenataService centrosinergijaKreiranjeIdenataService;
         private readonly INaloziTransferService naloziTransferService;
         public Action<string> LogAction { get; set; }
 
@@ -33,7 +34,8 @@ namespace AswTransferToPantheon.Services.Implementation
                                     INaloziTransferService naloziTransferService,
                                     ITransferFileLogger transferFileLogger,
                                     IEmailNotificationService emailNotificationService,
-                                    IDocumentCreationService_CL_WMS documentCreationService_CL_WMS)
+                                    IDocumentCreationService_CL_WMS documentCreationService_CL_WMS,
+                                    ICentrosinergijaKreiranjeIdenataService centrosinergijaKreiranjeIdenataService)
         {
             this.schedulerConfiguration = schedulerConfiguration;
             this.kifTransferService = kifTransferService;
@@ -43,6 +45,7 @@ namespace AswTransferToPantheon.Services.Implementation
             this.transferFileLogger = transferFileLogger;
             this.emailNotificationService = emailNotificationService;
             this.documentCreationService_CL_WMS = documentCreationService_CL_WMS;
+            this.centrosinergijaKreiranjeIdenataService = centrosinergijaKreiranjeIdenataService; ;
         }
 
         public Task ScheduleTasks()
@@ -554,38 +557,87 @@ namespace AswTransferToPantheon.Services.Implementation
         {
             var badRecords = new List<BadRecordInfo>();
 
-            kifTransferService.LogAction = CreateLogAction(groupName, taskName);
+            var kreiranjeIdenataBadRecords =
+                new List<BadRecordInfo>();
 
-            kifTransferService.BadRecordAction = (table, key, data, message, ex) =>
-            {
-                transferFileLogger.BadRecord(groupName, taskName, table, key, data, ex);
+            kifTransferService.LogAction =
+                CreateLogAction(groupName, taskName);
 
-                badRecords.Add(new BadRecordInfo
+            kifTransferService.BadRecordAction = (table, key, data, message, exception) =>
                 {
-                    TableName = table,
-                    Key = key,
-                    Message = message,
-                    Data = data,
-                    Exception = ex.Message
-                });
-            };
+                    transferFileLogger.BadRecord(groupName, taskName, table, key, data, exception);
+
+                    badRecords.Add(
+                        new BadRecordInfo
+                        {
+                            TableName = table,
+                            Key = key,
+                            Data = data,
+                            Message = message,
+                            Exception = exception.Message
+                        });
+                };
+
+            const string kreiranjeIdenataTaskName = "KreiranjeIdenata";
+
+            centrosinergijaKreiranjeIdenataService.LogAction = CreateLogAction( groupName, kreiranjeIdenataTaskName);
+
+            centrosinergijaKreiranjeIdenataService.ErrorAction =
+                error =>
+                {
+                    transferFileLogger.BadRecord(
+                        groupName,
+                        kreiranjeIdenataTaskName,
+                        error.TableName,
+                        error.Key,
+                        error.Data,
+                        new Exception(error.Exception));
+
+                    kreiranjeIdenataBadRecords.Add(error);
+                };
 
             try
             {
-                transferFileLogger.Info(groupName, taskName, $"START {taskName}. BatchSize: {batchSize}");
+                transferFileLogger.Info(
+                    groupName,
+                    taskName,
+                    $"START {taskName}. " +
+                    $"BatchSize: {batchSize}");
 
                 await kifTransferService.Transfer(
                     batchSize,
                     cancellationTokenSource.Token);
 
+                transferFileLogger.Info(
+                    groupName,
+                    kreiranjeIdenataTaskName,
+                    "KIF prenos je završen. " +
+                    "Počinje kreiranje identa u CENTROSINERGIJA bazi.");
+
+                await centrosinergijaKreiranjeIdenataService.Execute(
+                    cancellationTokenSource.Token);
+
                 if (badRecords.Count > 0)
                 {
-                    await emailNotificationService.SendBadRecordsSummaryEmail(
-                        groupName,
-                        taskName,
-                        badRecords,
-                        cancellationTokenSource.Token);
+                    await emailNotificationService
+                        .SendBadRecordsSummaryEmail(
+                            groupName,
+                            taskName,
+                            badRecords,
+                            cancellationTokenSource.Token);
                 }
+
+                if (kreiranjeIdenataBadRecords.Count > 0)
+                {
+                    await emailNotificationService
+                        .SendBadRecordsSummaryEmail(
+                            groupName,
+                            kreiranjeIdenataTaskName,
+                            kreiranjeIdenataBadRecords,
+                            cancellationTokenSource.Token);
+                }
+
+                transferFileLogger.Info(groupName, kreiranjeIdenataTaskName, "Kreiranje identa u CENTROSINERGIJA bazi je završeno.");
 
                 transferFileLogger.Info(groupName, taskName, $"END {taskName}.");
             }
@@ -593,7 +645,7 @@ namespace AswTransferToPantheon.Services.Implementation
             {
                 if (TransferErrorHelper.IsCriticalError(exception))
                 {
-                    var message = $"Kritična greška u tasku {taskName}. Trenutno izvršavanje se prekida do sledećeg zakazanog termina.";
+                    var message = $"Kritična greška u tasku {taskName}. " + "Trenutno izvršavanje se prekida do sledećeg termina.";
 
                     await LogCritical(groupName, taskName, message, exception);
 

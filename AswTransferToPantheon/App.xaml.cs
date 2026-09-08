@@ -42,6 +42,7 @@ namespace AswTransferToPantheon
                 services.AddSingleton<IEmailNotificationService, EmailNotificationService>();
                 services.AddSingleton<ITaskSchedulerService, TaskSchedulerService>();
                 services.AddTransient<IDocumentCreationService_CL_WMS, DocumentCreationService_CL_WMS>();
+                services.AddTransient<ICentrosinergijaKreiranjeIdenataService, CentrosinergijaKreiranjeIdenataService>();
                 services.AddTransient<INaloziTransferService, NaloziTransferService>();
             })
             .Build();
