@@ -38,18 +38,23 @@ public sealed class CentrosinergijaKreiranjeIdenataService : ICentrosinergijaKre
 
         command.CommandTimeout = 2000;
 
-        var runIdParameter = command.Parameters.Add("@RunID", SqlDbType.UniqueIdentifier);
+        var runIdParameter =
+            command.Parameters.Add("@RunID", SqlDbType.UniqueIdentifier);
 
         runIdParameter.Direction = ParameterDirection.InputOutput;
 
         runIdParameter.Value = DBNull.Value;
 
-        await using var reader =
-            await command.ExecuteReaderAsync(token);
+        await using var reader = await command.ExecuteReaderAsync(token);
+
+
+        /* ============================================================
+           1. RESULT SET - ZBIRNI REZULTAT
+           ============================================================ */
 
         if (await reader.ReadAsync(token))
         {
-            var runId = reader["RunID"] == DBNull.Value ? string.Empty : reader["RunID"].ToString() ?? string.Empty;
+            var runId = reader["RunID"] == DBNull.Value ? string.Empty : reader["RunID"]?.ToString() ?? string.Empty;
 
             var primarne = Convert.ToInt32(reader["KreiranePrimarneKlasifikacije"]);
 
@@ -89,6 +94,11 @@ public sealed class CentrosinergijaKreiranjeIdenataService : ICentrosinergijaKre
                 "procedura nije vratila zbirni rezultat.");
         }
 
+
+        /* ============================================================
+           2. RESULT SET - GREŠKE I UPOZORENJA
+           ============================================================ */
+
         if (await reader.NextResultAsync(token))
         {
             var fazaOrdinal = reader.GetOrdinal("Faza");
@@ -109,31 +119,74 @@ public sealed class CentrosinergijaKreiranjeIdenataService : ICentrosinergijaKre
 
             while (await reader.ReadAsync(token))
             {
-                var faza = reader.IsDBNull(fazaOrdinal) ? string.Empty : reader.GetValue(fazaOrdinal)?.ToString() ?? string.Empty;
+                var faza =
+                    reader.IsDBNull(fazaOrdinal)
+                        ? string.Empty
+                        : reader.GetValue(fazaOrdinal)?
+                            .ToString()
+                            ?? string.Empty;
 
-                var sourceId = reader.IsDBNull(sourceIdOrdinal) ? string.Empty : reader.GetValue(sourceIdOrdinal)?.ToString() ?? string.Empty;
+                var sourceId =
+                    reader.IsDBNull(sourceIdOrdinal)
+                        ? string.Empty
+                        : reader.GetValue(sourceIdOrdinal)?
+                            .ToString()
+                            ?? string.Empty;
 
-                var acIdent = reader.IsDBNull(acIdentOrdinal) ? string.Empty : reader.GetValue(acIdentOrdinal)?.ToString() ?? string.Empty;
+                var acIdent =
+                    reader.IsDBNull(acIdentOrdinal)
+                        ? string.Empty
+                        : reader.GetValue(acIdentOrdinal)?
+                            .ToString()
+                            ?? string.Empty;
 
-                var acName = reader.IsDBNull(acNameOrdinal) ? string.Empty : reader.GetValue(acNameOrdinal)?.ToString() ?? string.Empty;
+                var acName =
+                    reader.IsDBNull(acNameOrdinal)
+                        ? string.Empty
+                        : reader.GetValue(acNameOrdinal)?
+                            .ToString()
+                            ?? string.Empty;
 
-                var isWarning = !reader.IsDBNull(warningOrdinal) && Convert.ToBoolean(reader.GetValue(warningOrdinal));
+                var isWarning =
+                    !reader.IsDBNull(warningOrdinal) &&
+                    Convert.ToBoolean(
+                        reader.GetValue(warningOrdinal));
 
-                var errorNumber = reader.IsDBNull(errorNumberOrdinal) ? string.Empty : reader.GetValue(errorNumberOrdinal)?.ToString() ?? string.Empty;
+                var errorNumber =
+                    reader.IsDBNull(errorNumberOrdinal)
+                        ? string.Empty
+                        : reader.GetValue(errorNumberOrdinal)?
+                            .ToString()
+                            ?? string.Empty;
 
-                var errorLine = reader.IsDBNull(errorLineOrdinal) ? string.Empty : reader.GetValue(errorLineOrdinal)?.ToString() ?? string.Empty;
+                var errorLine =
+                    reader.IsDBNull(errorLineOrdinal)
+                        ? string.Empty
+                        : reader.GetValue(errorLineOrdinal)?
+                            .ToString()
+                            ?? string.Empty;
 
                 var errorMessage =
-                    reader.IsDBNull(errorMessageOrdinal) ? string.Empty : reader.GetValue(errorMessageOrdinal)?.ToString() ?? string.Empty;
+                    reader.IsDBNull(errorMessageOrdinal)
+                        ? string.Empty
+                        : reader.GetValue(errorMessageOrdinal)?
+                            .ToString()
+                            ?? string.Empty;
 
                 ErrorAction?.Invoke(
                     new BadRecordInfo
                     {
-                        TableName = $"CENTROSINERGIJA - {faza}",
+                        TableName =
+                            $"CENTROSINERGIJA - {faza}",
 
-                        Key = $"SourceID={sourceId}; AcIdent={acIdent}",
+                        Key =
+                            $"SourceID={sourceId}; " +
+                            $"AcIdent={acIdent}",
 
-                        Message = isWarning ? $"UPOZORENJE: {errorMessage}" : errorMessage,
+                        Message =
+                            isWarning
+                                ? $"UPOZORENJE: {errorMessage}"
+                                : errorMessage,
 
                         Data =
                             $"Faza={faza}; " +
@@ -151,6 +204,75 @@ public sealed class CentrosinergijaKreiranjeIdenataService : ICentrosinergijaKre
             }
         }
 
-        LogAction?.Invoke("CENTROSINERGIJA kreiranje identa - " + "obrada grešaka završena.");
+
+        /* ============================================================
+           3. RESULT SET - USPEŠNO KREIRANI IDENTI
+           ============================================================ */
+
+        if (await reader.NextResultAsync(token))
+        {
+            var createdSourceIdOrdinal = reader.GetOrdinal("SourceID");
+
+            var createdAcIdentOrdinal = reader.GetOrdinal("AcIdent");
+
+            var createdAcNameOrdinal = reader.GetOrdinal("AcName");
+
+            var createdAcClassifOrdinal = reader.GetOrdinal("AcClassif");
+
+            var createdAcClassif2Ordinal = reader.GetOrdinal("AcClassif2");
+
+            var createdAtOrdinal = reader.GetOrdinal("CreatedAt");
+
+            while (await reader.ReadAsync(token))
+            {
+                var createdIdent =
+                    new CreatedIdentCentrosinergijaInfo
+                    {
+                        SourceID =reader.IsDBNull(createdSourceIdOrdinal)
+                                ? 0
+                                : Convert.ToInt64(
+                                    reader.GetValue(
+                                        createdSourceIdOrdinal)),
+
+                        AcIdent =reader.IsDBNull(createdAcIdentOrdinal)
+                                ? string.Empty
+                                : reader.GetValue(
+                                        createdAcIdentOrdinal)?
+                                    .ToString()
+                                    ?? string.Empty,
+
+                        AcName =reader.IsDBNull(createdAcNameOrdinal)
+                                ? string.Empty
+                                : reader.GetValue(
+                                        createdAcNameOrdinal)?
+                                    .ToString()
+                                    ?? string.Empty,
+
+                        AcClassif =reader.IsDBNull(createdAcClassifOrdinal)
+                                ? string.Empty
+                                : reader.GetValue(
+                                        createdAcClassifOrdinal)?
+                                    .ToString()
+                                    ?? string.Empty,
+
+                        AcClassif2 =reader.IsDBNull(createdAcClassif2Ordinal)
+                                ? string.Empty
+                                : reader.GetValue(
+                                        createdAcClassif2Ordinal)?
+                                    .ToString()
+                                    ?? string.Empty,
+
+                        CreatedAt =reader.IsDBNull(createdAtOrdinal)
+                                ? DateTime.MinValue
+                                : Convert.ToDateTime(
+                                    reader.GetValue(
+                                        createdAtOrdinal))
+                    };
+
+                CreatedIdentCentrosinergijaAction?.Invoke(createdIdent);
+            }
+        }
+
+        LogAction?.Invoke("CENTROSINERGIJA kreiranje identa - " + "obrada rezultata završena.");
     }
 }

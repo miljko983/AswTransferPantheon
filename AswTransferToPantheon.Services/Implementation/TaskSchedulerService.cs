@@ -557,11 +557,10 @@ namespace AswTransferToPantheon.Services.Implementation
         {
             var badRecords = new List<BadRecordInfo>();
 
-            var kreiranjeIdenataBadRecords =
-                new List<BadRecordInfo>();
+            var kreiranjeIdenataBadRecords = new List<BadRecordInfo>();
+            var kreiraniIdentiCentrosinergija = new List<CreatedIdentCentrosinergijaInfo>();
 
-            kifTransferService.LogAction =
-                CreateLogAction(groupName, taskName);
+            kifTransferService.LogAction = CreateLogAction(groupName, taskName);
 
             kifTransferService.BadRecordAction = (table, key, data, message, exception) =>
                 {
@@ -595,6 +594,12 @@ namespace AswTransferToPantheon.Services.Implementation
 
                     kreiranjeIdenataBadRecords.Add(error);
                 };
+
+            centrosinergijaKreiranjeIdenataService.CreatedIdentCentrosinergijaAction =
+            ident =>
+            {
+                kreiraniIdentiCentrosinergija.Add(ident);
+            };
 
             try
             {
@@ -634,6 +639,16 @@ namespace AswTransferToPantheon.Services.Implementation
                             groupName,
                             kreiranjeIdenataTaskName,
                             kreiranjeIdenataBadRecords,
+                            cancellationTokenSource.Token);
+                }
+
+                if (kreiraniIdentiCentrosinergija.Count > 0)
+                {
+                    await emailNotificationService
+                        .SendCreatedIdentiCentrosinergijaSummaryEmail(
+                            groupName,
+                            kreiranjeIdenataTaskName,
+                            kreiraniIdentiCentrosinergija,
                             cancellationTokenSource.Token);
                 }
 
