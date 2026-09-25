@@ -829,28 +829,6 @@ namespace AswTransferToPantheon.Services.Implementation
 
             return result;
         }
-
-        /*private async Task SaveKifStavkeToTmpTable(List<KifStavka> kifStavke, CancellationToken token)
-        {
-            await using var connection = new SqlConnection(connectionStrings.Transfer);
-            await connection.OpenAsync(token);
-
-            await using var transaction = await connection.BeginTransactionAsync(token);
-
-            try
-            {
-                await ClearKifStavkeTmp(connection, (SqlTransaction)transaction, token);
-                await BulkInsertKifStavkeTmp(connection, (SqlTransaction)transaction, kifStavke, token);
-
-                await transaction.CommitAsync(token);
-            }
-            catch
-            {
-                await transaction.RollbackAsync(token);
-                throw;
-            }
-        }*/
-
         private async Task BulkInsertKifStavkeTmp(
             SqlConnection connection,
             SqlTransaction transaction,
@@ -940,27 +918,7 @@ namespace AswTransferToPantheon.Services.Implementation
             await command.ExecuteNonQueryAsync(token);
         }
 
-        /*private async Task SaveKifToTmpTable(List<Kif> kifovi, CancellationToken token)
-        {
-            await using var connection = new SqlConnection(connectionStrings.Transfer);
-            await connection.OpenAsync(token);
-
-            await using var transaction = await connection.BeginTransactionAsync(token);
-
-            try
-            {
-                await ClearKifTmp(connection, (SqlTransaction)transaction, token);
-                await BulkInsertKifTmp(connection, (SqlTransaction)transaction, kifovi, token);
-
-                await transaction.CommitAsync(token);
-            }
-            catch
-            {
-                await transaction.RollbackAsync(token);
-                throw;
-            }
-        }*/
-
+        
         private async Task BulkInsertKifTmp(SqlConnection connection, SqlTransaction transaction, List<Kif> kifovi, CancellationToken token)
         {
             var table = CreateKifDataTable(kifovi);
@@ -1127,7 +1085,7 @@ namespace AswTransferToPantheon.Services.Implementation
                 FROM IIS.KIF
                 WHERE ID > :lastId
                   AND LIKVIDIRAN = 'D'
-                  AND DATUMDOKUMENTA >= SYSDATE - 30
+                  AND DATUMRACUNA >= SYSDATE - 50
                 ORDER BY ID
                 FETCH NEXT :batchSize ROWS ONLY
                 """;

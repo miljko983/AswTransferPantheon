@@ -30,6 +30,8 @@ namespace AswTransferToPantheon.Services.Implementation
             await ExecuteWithLogging("Cenovnik", () => TransferCenovnik(batchSize, token));
             await ExecuteWithLogging("Artikli dobavljači",() => TransferArtikliDobavljaci(batchSize, token));
             await ExecuteWithLogging("Artikli osobine",() => TransferArtikliOsobine(batchSize, token));
+            await ExecuteWithLogging("Artikli dobavljači",() => TransferArtikliDobavljaci(batchSize, token));
+            await ExecuteWithLogging("Artikli map", () => TransferArtikliMap(batchSize, token));
             await ExecuteWithLogging("Barkodovi", () => TransferBarkodovi(batchSize, token));
             await ExecuteWithLogging("Robne grupe", () => TransferRobneGrupe(batchSize, token));
             await ExecuteWithLogging("CL_WMS artikli uvoz", () => ExecuteClWmsArtikliUvoz(token));
@@ -1787,6 +1789,213 @@ namespace AswTransferToPantheon.Services.Implementation
                 await BulkInsertCenovnikTmp(connection, (SqlTransaction)transaction, cenovnici, token);
 
                 await InsertCenovnik(connection, (SqlTransaction)transaction, token);
+
+                await transaction.CommitAsync(token);
+            }
+            catch
+            {
+                await transaction.RollbackAsync(token);
+                throw;
+            }
+        }
+
+        private async Task<List<ArtikalMap>> ReadArtikliMapBatch(long lastId, int batchSize, CancellationToken token)
+        {
+                    const string sql = """
+                SELECT
+                    ID,
+                    KOMITENTTIP,
+                    KOMITENT,
+                    ARTIKAL,
+                    VARIJANTA,
+                    ARTIKALKOM,
+                    VARIJANTAKOM,
+                    NAZIV,
+                    JEDINICAMERE,
+                    KATEGORIJA,
+                    JMKOM,
+                    KOLICINAKOM,
+                    KOLICINAMPJM
+                FROM IIS.ARTIKLIMAP
+                WHERE ID > :lastId
+                ORDER BY ID
+                FETCH NEXT :batchSize ROWS ONLY
+                """;
+
+            var result = new List<ArtikalMap>(batchSize);
+
+            await using var connection =
+                new OracleConnection(BuildOracleConnectionString());
+
+            await connection.OpenAsync(token);
+
+            await using var command = connection.CreateCommand();
+
+            command.CommandText = sql;
+            command.BindByName = true;
+
+            command.Parameters.Add("lastId", OracleDbType.Int64).Value = lastId;
+            command.Parameters.Add("batchSize", OracleDbType.Int32).Value = batchSize;
+
+            await using var reader = await command.ExecuteReaderAsync(token);
+
+            string GetText(string columnName)
+            {
+                var ordinal = reader.GetOrdinal(columnName);
+
+                return reader.IsDBNull(ordinal)
+                    ? string.Empty
+                    : reader.GetValue(ordinal)?.ToString()?.Trim()
+                      ?? string.Empty;
+            }
+
+            decimal? GetNullableDecimal(string columnName)
+            {
+                var ordinal = reader.GetOrdinal(columnName);
+
+                return reader.IsDBNull(ordinal)
+                    ? null
+                    : GetDecimal(reader, columnName);
+            }
+
+            while (await reader.ReadAsync(token))
+            {
+                result.Add(new ArtikalMap
+                {
+                    Id = GetInt64(reader, "ID"),
+                    KomitentTip = GetText("KOMITENTTIP"),
+                    Komitent = GetInt64(reader, "KOMITENT"),
+                    Artikal = GetInt64(reader, "ARTIKAL"),
+                    Varijanta = GetText("VARIJANTA"),
+                    ArtikalKom = GetText("ARTIKALKOM"),
+                    VarijantaKom = GetText("VARIJANTAKOM"),
+                    Naziv = GetText("NAZIV"),
+                    JedinicaMere = GetText("JEDINICAMERE"),
+                    Kategorija = GetText("KATEGORIJA"),
+                    JmKom = reader.IsDBNull(reader.GetOrdinal("JMKOM"))
+                        ? null
+                        : GetText("JMKOM"),
+                    KolicinaKom = GetNullableDecimal("KOLICINAKOM"),
+                    KolicinaMpjm = GetNullableDecimal("KOLICINAMPJM")
+                });
+            }
+
+            return result;
+        }
+
+        private async Task TransferArtikliMap(int batchSize, CancellationToken token)
+        {
+            long lastId = 0;
+
+            while (!token.IsCancellationRequested)
+            {
+                var artikliMap = await ReadArtikliMapBatch(
+                    lastId,
+                    batchSize,
+                    token);
+
+                if (artikliMap.Count == 0)
+                {
+                    break;
+                }
+
+                await SaveArtikliMapToTmpTable(artikliMap, token);
+
+                lastId = artikliMap[^1].Id;
+
+                LogAction?.Invoke($"Artikli map - prenet paket: {artikliMap.Count} redova. " + $"Poslednji ID: {lastId}.");
+            }
+        }
+
+        private async Task SaveArtikliMapToTmpTable(List<ArtikalMap> artikliMap, CancellationToken token)
+        {
+            if (artikliMap.Count == 0)
+            {
+                return;
+            }
+
+            await using var connection = new SqlConnection(connectionStrings.Transfer);
+
+            await connection.OpenAsync(token);
+
+            await using var transaction = (SqlTransaction)await connection.BeginTransactionAsync(token);
+
+            try
+            {
+                await using (var truncateCommand = connection.CreateCommand())
+                {
+                    truncateCommand.Transaction = transaction;
+                    truncateCommand.CommandText = "TRUNCATE TABLE dbo.ARTIKLIMAP_TMP";
+
+                    await truncateCommand.ExecuteNonQueryAsync(token);
+                }
+
+                using var table = new DataTable();
+
+                table.Columns.Add("ID", typeof(decimal));
+                table.Columns.Add("KOMITENTTIP", typeof(string));
+                table.Columns.Add("KOMITENT", typeof(decimal));
+                table.Columns.Add("ARTIKAL", typeof(decimal));
+                table.Columns.Add("VARIJANTA", typeof(string));
+                table.Columns.Add("ARTIKALKOM", typeof(string));
+                table.Columns.Add("VARIJANTAKOM", typeof(string));
+                table.Columns.Add("NAZIV", typeof(string));
+                table.Columns.Add("JEDINICAMERE", typeof(string));
+                table.Columns.Add("KATEGORIJA", typeof(string));
+                table.Columns.Add("JMKOM", typeof(string));
+                table.Columns.Add("KOLICINAKOM", typeof(decimal));
+                table.Columns.Add("KOLICINAMPJM", typeof(decimal));
+
+                foreach (var item in artikliMap)
+                {
+                    table.Rows.Add(
+                        item.Id,
+                        item.KomitentTip,
+                        item.Komitent,
+                        item.Artikal,
+                        item.Varijanta,
+                        item.ArtikalKom,
+                        item.VarijantaKom,
+                        item.Naziv,
+                        item.JedinicaMere,
+                        item.Kategorija,
+                        (object?)item.JmKom ?? DBNull.Value,
+                        (object?)item.KolicinaKom ?? DBNull.Value,
+                        (object?)item.KolicinaMpjm ?? DBNull.Value);
+                }
+
+                using (var bulkCopy = new SqlBulkCopy(
+                    connection,
+                    SqlBulkCopyOptions.TableLock,
+                    transaction))
+                {
+                    bulkCopy.DestinationTableName = "dbo.ARTIKLIMAP_TMP";
+
+                    bulkCopy.BatchSize = artikliMap.Count;
+                    bulkCopy.BulkCopyTimeout = 600;
+
+                    foreach (DataColumn column in table.Columns)
+                    {
+                        bulkCopy.ColumnMappings.Add(
+                            column.ColumnName,
+                            column.ColumnName);
+                    }
+
+                    await bulkCopy.WriteToServerAsync(table, token);
+                }
+
+                await using (var command = connection.CreateCommand())
+                {
+                    command.Transaction = transaction;
+                    command.CommandText = "dbo._pr_MergeArtikliMap";
+
+                    command.CommandType =
+                        CommandType.StoredProcedure;
+
+                    command.CommandTimeout = 600;
+
+                    await command.ExecuteNonQueryAsync(token);
+                }
 
                 await transaction.CommitAsync(token);
             }
