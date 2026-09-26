@@ -23,12 +23,13 @@ namespace AswTransferToPantheon.Services.Implementation
             if (token.IsCancellationRequested)
             {
                 return;
-            }
+            }          
 
             long lastId = 0;
             var totalKif = 0;
             var totalStavke = 0;
             var batchNumber = 0;
+            var totalEOtpremnicaSeo = 0;
 
             LogAction?.Invoke("KIF - početak prenosa...");
 
@@ -61,19 +62,24 @@ namespace AswTransferToPantheon.Services.Implementation
                 var kifDatumValute = await ReadKifDatumValute(kifIds, token);
                 var kifKomentari = await ReadKifKomentari(kifIds, token);
                 var vlpZaglavlja = await ReadVlpZaglavlja(kifIds, token);
+                var vlpZaglavljaIds = vlpZaglavlja.Select(x => x.Id).Distinct().ToList();
+                var eOtpremniceSeo = await ReadEOtpremnicaSeo(vlpZaglavljaIds, token);
 
-                await InsertKifPackage(noviKifovi, kifStavke, kifDatumValute, kifKomentari, vlpZaglavlja, token);
+                LogAction?.Invoke($"KIF paket {batchNumber}: " + $"pročitano {eOtpremniceSeo.Count} eOtpremnicaSEO zapisa.");
+
+                await InsertKifPackage(noviKifovi, kifStavke, kifDatumValute, kifKomentari, vlpZaglavlja, eOtpremniceSeo, token);
 
                 totalKif += noviKifovi.Count;
                 totalStavke += kifStavke.Count;
+                totalEOtpremnicaSeo += eOtpremniceSeo.Count;
 
-                LogAction?.Invoke(
-                   $"KIF paket {batchNumber}: ubačeno {noviKifovi.Count} KIF, {kifStavke.Count} stavki, {kifDatumValute.Count} datum valute, {kifKomentari.Count} komentara, {vlpZaglavlja.Count} VLP zaglavlja.");
+                LogAction?.Invoke($"KIF paket {batchNumber}: " + $"ubačeno {noviKifovi.Count} KIF, " + $"{kifStavke.Count} stavki, " +
+                                  $"{kifDatumValute.Count} datum valute, " + $"{kifKomentari.Count} komentara, " +
+                                  $"{vlpZaglavlja.Count} VLP zaglavlja, " + $"{eOtpremniceSeo.Count} eOtpremnicaSEO zapisa.");
             }
 
-            
-            LogAction?.Invoke(
-                $"KIF završen. Ukupno ubačeno: {totalKif} KIF, {totalStavke} stavki.");
+
+            LogAction?.Invoke($"KIF završen. " + $"Ukupno ubačeno: {totalKif} KIF, " + $"{totalStavke} stavki, " + $"{totalEOtpremnicaSeo} eOtpremnicaSEO zapisa."); ;
         }
 
         
@@ -220,8 +226,6 @@ namespace AswTransferToPantheon.Services.Implementation
 
             return table;
         }
-
-
 
         private async Task<List<VlpZaglavlje>> ReadVlpZaglavlja(List<long> kifIds, CancellationToken token)
         {
@@ -371,6 +375,79 @@ namespace AswTransferToPantheon.Services.Implementation
             return result;
         }
 
+        private async Task<List<EOtpremnicaSeo>> ReadEOtpremnicaSeo(List<long> vlpZaglavljaIds, CancellationToken token)
+        {
+            if (vlpZaglavljaIds.Count == 0)
+            {
+                return [];
+            }
+
+            var parameterNames = vlpZaglavljaIds.Select((_, index) => $":vlp{index}").ToList();
+
+            const string datumOd = "2026-09-01";
+
+            var sql = $"""
+                    SELECT
+                        ID,
+                        VLPZAGLAVLJE,
+                        STATUS,
+                        REQUESTID,
+                        EXTDOCUMENTID,
+                        VREME,
+                        KORISNIK,
+                        REQUESTDATE,
+                        PVREQUESTID,
+                        PVREQUESTDATE,
+                        PZREQUESTID,
+                        PZREQUESTDATE
+                    FROM IIS.eOtpremnicaSEO
+                    WHERE VREME >= DATE '{datumOd}'
+                      AND VLPZAGLAVLJE IN ({string.Join(", ", parameterNames)})
+                    ORDER BY
+                        VLPZAGLAVLJE,
+                        ID
+                    """;
+
+            var result = new List<EOtpremnicaSeo>();
+
+            await using var connection = new OracleConnection(BuildOracleConnectionString());
+
+            await connection.OpenAsync();
+
+            await using var command = connection.CreateCommand();
+
+            command.CommandText = sql;
+            command.BindByName = true;
+
+            for (var i = 0; i < vlpZaglavljaIds.Count; i++)
+            {
+                command.Parameters.Add($"vlp{i}", OracleDbType.Int64).Value = vlpZaglavljaIds[i];
+            }
+
+            await using var reader = await command.ExecuteReaderAsync(token);
+
+            while (await reader.ReadAsync(token))
+            {
+                result.Add(
+                    new EOtpremnicaSeo
+                    {
+                        Id = GetInt64(reader, "ID"),
+                        VlpZaglavlje = GetInt64(reader, "VLPZAGLAVLJE"),
+                        Status = GetString(reader, "STATUS") ?? string.Empty,
+                        RequestId = GetString(reader, "REQUESTID"),
+                        ExtDocumentId = GetString(reader, "EXTDOCUMENTID"),
+                        Vreme = GetDateTime(reader, "VREME") ?? DateTime.MinValue,
+                        Korisnik = GetString(reader, "KORISNIK") ?? string.Empty,
+                        RequestDate = GetDateTime(reader, "REQUESTDATE") ?? DateTime.MinValue,
+                        PvRequestId = GetString(reader, "PVREQUESTID"),
+                        PvRequestDate = GetDateTime(reader, "PVREQUESTDATE"),
+                        PzRequestId = GetString(reader, "PZREQUESTID"),
+                        PzRequestDate = GetDateTime(reader, "PZREQUESTDATE")
+                    });
+            }
+
+            return result;
+        }
         private async Task<List<KifKomentar>> ReadKifKomentari(List<long> kifIds, CancellationToken token)
         {
             if (kifIds.Count == 0)
@@ -567,7 +644,8 @@ namespace AswTransferToPantheon.Services.Implementation
                 .ToList();
         }
 
-        private async Task InsertKifPackage( List<Kif> kifovi, List<KifStavka> kifStavke, List<KifDatumValute> kifDatumValute, List<KifKomentar> kifKomentari, List<VlpZaglavlje> vlpZaglavlja, CancellationToken token)
+        private async Task InsertKifPackage( List<Kif> kifovi, List<KifStavka> kifStavke, List<KifDatumValute> kifDatumValute, List<KifKomentar> kifKomentari, 
+                                             List<VlpZaglavlje> vlpZaglavlja, List<EOtpremnicaSeo> eOtpremniceSeo, CancellationToken token)
         {
             await using var connection = new SqlConnection(connectionStrings.Transfer);
             await connection.OpenAsync(token);
@@ -581,6 +659,7 @@ namespace AswTransferToPantheon.Services.Implementation
                 await BulkInsertKifDatumValute(connection, (SqlTransaction)transaction, kifDatumValute, token);
                 await BulkInsertKifKomentari(connection, (SqlTransaction)transaction, kifKomentari, token);
                 await BulkInsertVlpZaglavlja(connection, (SqlTransaction)transaction, vlpZaglavlja, token);
+                await BulkInsertEOtpremnicaSeo(connection, (SqlTransaction)transaction, eOtpremniceSeo, token);
 
                 await transaction.CommitAsync(token);
             }
@@ -1192,5 +1271,68 @@ namespace AswTransferToPantheon.Services.Implementation
             var ordinal = reader.GetOrdinal(columnName);
             return reader.IsDBNull(ordinal) ? null : Convert.ToDecimal(reader.GetValue(ordinal));
         }
+
+        private async Task BulkInsertEOtpremnicaSeo(SqlConnection connection, SqlTransaction transaction, List<EOtpremnicaSeo> eOtpremniceSeo, CancellationToken token)
+        {
+            if (eOtpremniceSeo.Count == 0)
+            {
+                return;
+            }
+
+            var table = CreateEOtpremnicaSeoDataTable(eOtpremniceSeo);
+
+            using var bulkCopy = new SqlBulkCopy(connection, SqlBulkCopyOptions.CheckConstraints, transaction);
+
+            bulkCopy.DestinationTableName = "dbo._tb_EotpremnicaSeo";
+
+            bulkCopy.BatchSize = eOtpremniceSeo.Count;
+
+            bulkCopy.BulkCopyTimeout = 60;
+
+            foreach (DataColumn column in table.Columns)
+            {
+                bulkCopy.ColumnMappings.Add(column.ColumnName, column.ColumnName);
+            }
+
+            await bulkCopy.WriteToServerAsync(table);
+        }
+
+        private DataTable CreateEOtpremnicaSeoDataTable( List<EOtpremnicaSeo> eOtpremniceSeo)
+        {
+            var table = new DataTable();
+
+            table.Columns.Add("ID", typeof(decimal));
+            table.Columns.Add("VLPZAGLAVLJE", typeof(decimal));
+            table.Columns.Add("STATUS", typeof(string));
+            table.Columns.Add("REQUESTID", typeof(string));
+            table.Columns.Add("EXTDOCUMENTID", typeof(string));
+            table.Columns.Add("VREME", typeof(DateTime));
+            table.Columns.Add("KORISNIK", typeof(string));
+            table.Columns.Add("REQUESTDATE", typeof(DateTime));
+            table.Columns.Add("PVREQUESTID", typeof(string));
+            table.Columns.Add("PVREQUESTDATE", typeof(DateTime));
+            table.Columns.Add("PZREQUESTID", typeof(string));
+            table.Columns.Add("PZREQUESTDATE", typeof(DateTime));
+
+            foreach (var item in eOtpremniceSeo)
+            {
+                table.Rows.Add(
+                    item.Id,
+                    item.VlpZaglavlje,
+                    item.Status,
+                    DbValue(item.RequestId),
+                    DbValue(item.ExtDocumentId),
+                    item.Vreme,
+                    item.Korisnik,
+                    item.RequestDate,
+                    DbValue(item.PvRequestId),
+                    DbValue(item.PvRequestDate),
+                    DbValue(item.PzRequestId),
+                    DbValue(item.PzRequestDate));
+            }
+
+            return table;
+        }
+
     }
 }
