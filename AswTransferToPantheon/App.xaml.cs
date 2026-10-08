@@ -39,11 +39,15 @@ namespace AswTransferToPantheon
                 services.AddTransient<IArtikliTransferService, ArtikliTransferService>();
                 services.AddTransient<IVlpIzvSveTransferService, VlpIzvSveTransferService>();
                 services.AddSingleton<ITransferFileLogger, TransferFileLogger>();
+                services.AddSingleton<EmailRecipientCache>();
+                services.AddHostedService<EmailRecipientRefreshService>();
                 services.AddSingleton<IEmailNotificationService, EmailNotificationService>();
                 services.AddSingleton<ITaskSchedulerService, TaskSchedulerService>();
                 services.AddTransient<IDocumentCreationService_CL_WMS, DocumentCreationService_CL_WMS>();
                 services.AddTransient<ICentrosinergijaKreiranjeIdenataService, CentrosinergijaKreiranjeIdenataService>();
                 services.AddTransient<INaloziTransferService, NaloziTransferService>();
+
+                
             })
             .Build();
         }

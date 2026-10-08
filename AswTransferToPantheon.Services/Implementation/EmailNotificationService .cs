@@ -12,10 +12,11 @@ namespace AswTransferToPantheon.Services.Implementation;
 public sealed class EmailNotificationService : IEmailNotificationService
 {
     private readonly EmailConfiguration configuration;
-
-    public EmailNotificationService(IOptions<EmailConfiguration> configuration)
+    private readonly EmailRecipientCache emailRecipientCache;
+    public EmailNotificationService(IOptions<EmailConfiguration> configuration, EmailRecipientCache emailRecipientCache)
     {
         this.configuration = configuration.Value;
+        this.emailRecipientCache = emailRecipientCache;
     }
 
     public Task SendTestEmail(CancellationToken token)
@@ -35,12 +36,7 @@ public sealed class EmailNotificationService : IEmailNotificationService
             "-",
             "-");
 
-        return SendEmail(
-            notification.Subject,
-            body,
-            notification.To,
-            notification.Cc,
-            token);
+        return SendEmail(notification.Subject, body, "Startup", token);
     }
 
     public Task SendBadRecordsSummaryEmail(string groupName, string taskName, List<BadRecordInfo> badRecords, CancellationToken token)
@@ -62,17 +58,9 @@ public sealed class EmailNotificationService : IEmailNotificationService
 
         var subject = notification.Subject;
 
-        var body = BuildBadRecordsSummaryBody(
-            groupName,
-            taskName,
-            badRecords);
+        var body = BuildBadRecordsSummaryBody(groupName, taskName, badRecords);
 
-        return SendEmail(
-            subject,
-            body,
-            notification.To,
-            notification.Cc,
-            token);
+        return SendEmail(subject, body, taskName, token);
     }
 
     public Task SendTaskErrorEmail(string groupName, string taskName, string message, Exception exception, CancellationToken token, string notificationKey = "Task.Error")
@@ -92,19 +80,20 @@ public sealed class EmailNotificationService : IEmailNotificationService
             exception.ToString(),
             "-");
 
-        return SendEmail(
-            notification.Subject,
-            body,
-            notification.To,
-            notification.Cc,
-            token);
+        return SendEmail(notification.Subject, body, "Task", token);
     }
 
-    private async Task SendEmail(string subject, string body, List<string> recipients, List<string> ccRecipients,
-    CancellationToken token)
+    private async Task SendEmail(string subject, string body, string oblast, CancellationToken token)
     {
-        if (!configuration.Enabled ||
-            recipients.Count == 0)
+        if (!configuration.Enabled)
+        {
+            return;
+        }
+
+        var recipients = emailRecipientCache.GetRecipients(oblast);
+
+        if (recipients is null ||
+            recipients.To.Count == 0)
         {
             return;
         }
@@ -117,14 +106,12 @@ public sealed class EmailNotificationService : IEmailNotificationService
             IsBodyHtml = true
         };
 
-        foreach (var recipient in recipients
-            .Where(x => !string.IsNullOrWhiteSpace(x)))
+        foreach (var to in recipients.To)
         {
-            mailMessage.To.Add(recipient);
+            mailMessage.To.Add(to);
         }
 
-        foreach (var cc in ccRecipients
-            .Where(x => !string.IsNullOrWhiteSpace(x)))
+        foreach (var cc in recipients.Cc)
         {
             mailMessage.CC.Add(cc);
         }
@@ -237,12 +224,10 @@ public sealed class EmailNotificationService : IEmailNotificationService
 
         var body = BuildCreatedArticlesSummaryBody(groupName, taskName, articles);
 
-        return SendEmail(subject, body, notification.To, notification.Cc, token);
+        return SendEmail(subject, body, "Artikli", token);
     }
 
-    private bool TryGetNotification(
-    string notificationKey,
-    out TransferEmailConfiguration notification)
+    private bool TryGetNotification(string notificationKey, out TransferEmailConfiguration notification)
     {
         notification = null!;
 
@@ -258,8 +243,7 @@ public sealed class EmailNotificationService : IEmailNotificationService
             return false;
         }
 
-        if (!foundNotification.Enabled ||
-            foundNotification.To.Count == 0)
+        if (!foundNotification.Enabled)
         {
             return false;
         }
@@ -325,7 +309,7 @@ public sealed class EmailNotificationService : IEmailNotificationService
 
         var body = BuildCreatedDocumentsSummaryBody(groupName, taskName, documents);
 
-        return SendEmail(subject, body, notification.To, notification.Cc, token);
+        return SendEmail(notification.Subject, body, "Dokumenti", token);
     }
 
     private string BuildCreatedDocumentsSummaryBody(string groupName, string taskName, List<CreatedDocumentInfo> documents)
@@ -384,7 +368,7 @@ public sealed class EmailNotificationService : IEmailNotificationService
 
         var body = BuildBadRecordsSummaryBody(groupName, taskName, errors);
 
-        return SendEmail(notification.Subject, body, notification.To, notification.Cc, token);
+        return SendEmail(notification.Subject, body, "Dokumenti", token);
     }
 
     public Task SendCreatedIdentiCentrosinergijaSummaryEmail(string groupName, string taskName, List<CreatedIdentCentrosinergijaInfo> identi, CancellationToken token)
@@ -401,7 +385,7 @@ public sealed class EmailNotificationService : IEmailNotificationService
 
         var body = BuildCreatedIdentiCentrosinergijaSummaryBody(groupName, taskName, identi);
 
-        return SendEmail(notification.Subject, body, notification.To, notification.Cc, token);
+        return SendEmail(notification.Subject, body, "KreiranjeIdenata", token);
     }
 
     private string BuildCreatedIdentiCentrosinergijaSummaryBody(string groupName, string taskName, List<CreatedIdentCentrosinergijaInfo> identi)

@@ -30,6 +30,7 @@ namespace AswTransferToPantheon.Services.Implementation
             var totalStavke = 0;
             var batchNumber = 0;
             var totalEOtpremnicaSeo = 0;
+            var totalAktiviranihIdenata = 0;
 
             LogAction?.Invoke("KIF - početak prenosa...");
 
@@ -69,6 +70,11 @@ namespace AswTransferToPantheon.Services.Implementation
 
                 await InsertKifPackage(noviKifovi, kifStavke, kifDatumValute, kifKomentari, vlpZaglavlja, eOtpremniceSeo, token);
 
+                var artikalIds = kifStavke.Select(x => Convert.ToInt64(x.Artikal)).Distinct().ToList();
+
+                var aktivirano = await AktivirajIdentePoKifStavkama(artikalIds, token);
+                totalAktiviranihIdenata += aktivirano;
+
                 totalKif += noviKifovi.Count;
                 totalStavke += kifStavke.Count;
                 totalEOtpremnicaSeo += eOtpremniceSeo.Count;
@@ -79,7 +85,8 @@ namespace AswTransferToPantheon.Services.Implementation
             }
 
 
-            LogAction?.Invoke($"KIF završen. " + $"Ukupno ubačeno: {totalKif} KIF, " + $"{totalStavke} stavki, " + $"{totalEOtpremnicaSeo} eOtpremnicaSEO zapisa."); ;
+            LogAction?.Invoke($"KIF završen. " + $"Ukupno ubačeno: {totalKif} KIF, " + $"{totalStavke} stavki, " + $"{totalEOtpremnicaSeo} eOtpremnicaSEO zapisa.");
+            LogAction?.Invoke($"KIF aktivacija identa završena. " + $"Ukupno aktivirano: {totalAktiviranihIdenata}.");
         }
 
         
@@ -1332,6 +1339,54 @@ namespace AswTransferToPantheon.Services.Implementation
             }
 
             return table;
+        }        
+
+        private async Task<int> AktivirajIdentePoKifStavkama(IReadOnlyCollection<long> artikalIds, CancellationToken token)
+        {
+            if (artikalIds.Count == 0)
+            {
+                return 0;
+            }
+
+            var tabela = new DataTable();
+
+            tabela.Columns.Add("ArtikalID", typeof(long));
+
+            foreach (var artikalId in artikalIds.Distinct())
+            {
+                tabela.Rows.Add(artikalId);
+            }
+
+            await using var connection = new SqlConnection(connectionStrings.Transfer);
+
+            await connection.OpenAsync(token);
+
+            await using var command = connection.CreateCommand();
+
+            command.CommandText = "dbo._pr_AktivirajIdentePoKifStavkama";
+
+            command.CommandType = CommandType.StoredProcedure;
+
+            command.CommandTimeout = 600;
+
+            var parameter = command.Parameters.Add("@ArtikalIds", SqlDbType.Structured);
+
+            parameter.TypeName = "dbo._tt_ArtikalIds";
+
+            parameter.Value = tabela;
+
+            var rezultat = await command.ExecuteScalarAsync(token);
+
+            var brojAktiviranih =
+                rezultat == null || rezultat == DBNull.Value
+                    ? 0
+                    : Convert.ToInt32(rezultat);
+
+            LogAction?.Invoke(
+                $"CENTROSINERGIJA: aktivirano " +
+                $"{brojAktiviranih} identa iz KIF paketa.");
+
+            return brojAktiviranih;
         }
 
     }

@@ -277,78 +277,9 @@ namespace AswTransferToPantheon.Services.Implementation
             return Task.CompletedTask;
         }
 
-        /* private async Task ScheduleNextDaily(DailyTask dtc, DateTime nextTime)
-         {
-             if (cancellationTokenSource.IsCancellationRequested)
-             {
-                 LogAction?.Invoke("Task execution cancelled.");
-                 return;
-             }
+        
 
-             var groupName = Path.Combine("DailyTasks", dtc.Name);
-
-             try
-             {
-                 var difference = nextTime.Subtract(DateTime.Now);
-
-                 transferFileLogger.Info(groupName, "Scheduler", $"Scheduled daily task {dtc.Name} for {nextTime}.");
-
-                 await Task.Delay(difference, cancellationTokenSource.Token);
-
-                 transferFileLogger.Info(groupName, "Scheduler", $"Executing daily task {dtc.Name}.");
-
-                 await ExecuteTasks(dtc, dtc.BatchSize);
-
-                 lock (TaskLock)
-                 {
-                     executionTimes[dtc.Name] = DateTime.Now;
-                     SaveExecutionTimes();
-                 }
-
-                 transferFileLogger.Info(groupName, "Scheduler", $"Executed daily task {dtc.Name}.");
-             }
-             catch (OperationCanceledException)
-             {
-                 transferFileLogger.Info(groupName, "Scheduler", $"Daily task {dtc.Name} cancelled.");
-             }
-             catch (CriticalTransferException exc)
-             {
-                 transferFileLogger.Info(
-                     groupName,
-                     "Scheduler",
-                     $"Daily task {dtc.Name} stopped because of critical error. Next schedule will continue normally.");
-             }
-             catch (Exception exception)
-             {
-                 if (TransferErrorHelper.IsCriticalError(exception))
-                 {
-                     await LogCritical(
-                         groupName,
-                         "Scheduler",
-                         $"Critical error executing daily task {dtc.Name}.",
-                         exception);
-                 }
-                 else
-                 {
-                     LogError(
-                         groupName,
-                         "Scheduler",
-                         $"Error executing daily task {dtc.Name}.",
-                         exception);
-                 }
-             }
-             finally
-             {
-                 if (!cancellationTokenSource.IsCancellationRequested)
-                 {
-                     _ = ScheduleDailyTask(dtc, false);
-                 }
-             }
-         }*/
-
-        private async Task ScheduleNextDaily(
-    DailyTask dtc,
-    DateTime nextTime)
+        private async Task ScheduleNextDaily(DailyTask dtc, DateTime nextTime)
         {
             if (cancellationTokenSource.IsCancellationRequested)
             {
@@ -553,21 +484,11 @@ namespace AswTransferToPantheon.Services.Implementation
             }
         }
 
-        private async Task TransferKif(
-    int batchSize,
-    string groupName,
-    string taskName)
+        private async Task TransferKif(int batchSize, string groupName, string taskName)
         {
             var badRecords = new List<BadRecordInfo>();
 
-            var kreiranjeIdenataBadRecords =
-                new List<BadRecordInfo>();
-
-            var kreiraniIdentiCentrosinergija =
-                new List<CreatedIdentCentrosinergijaInfo>();
-
-            kifTransferService.LogAction =
-                CreateLogAction(groupName, taskName);
+            kifTransferService.LogAction = CreateLogAction(groupName,taskName);
 
             kifTransferService.BadRecordAction =
                 (table, key, data, message, exception) =>
@@ -591,34 +512,6 @@ namespace AswTransferToPantheon.Services.Implementation
                         });
                 };
 
-            const string kreiranjeIdenataTaskName =
-                "KreiranjeIdenata";
-
-            centrosinergijaKreiranjeIdenataService.LogAction =
-                CreateLogAction(
-                    groupName,
-                    kreiranjeIdenataTaskName);
-
-            centrosinergijaKreiranjeIdenataService.ErrorAction =
-                error =>
-                {
-                    transferFileLogger.BadRecord(
-                        groupName,
-                        kreiranjeIdenataTaskName,
-                        error.TableName,
-                        error.Key,
-                        error.Data,
-                        new Exception(error.Exception));
-
-                    kreiranjeIdenataBadRecords.Add(error);
-                };
-
-            centrosinergijaKreiranjeIdenataService.CreatedIdentCentrosinergijaAction =
-                ident =>
-                {
-                    kreiraniIdentiCentrosinergija.Add(ident);
-                };
-
             try
             {
                 transferFileLogger.Info(
@@ -627,47 +520,7 @@ namespace AswTransferToPantheon.Services.Implementation
                     $"START {taskName}. " +
                     $"BatchSize: {batchSize}");
 
-                transferFileLogger.Info(
-                    groupName,
-                    kreiranjeIdenataTaskName,
-                    "Počinje kreiranje identa u CENTROSINERGIJA bazi.");
-
-                await centrosinergijaKreiranjeIdenataService.Execute(
-                    cancellationTokenSource.Token);
-
-                if (kreiranjeIdenataBadRecords.Count > 0)
-                {
-                    await emailNotificationService
-                        .SendBadRecordsSummaryEmail(
-                            groupName,
-                            kreiranjeIdenataTaskName,
-                            kreiranjeIdenataBadRecords,
-                            cancellationTokenSource.Token);
-                }
-
-                if (kreiraniIdentiCentrosinergija.Count > 0)
-                {
-                    await emailNotificationService
-                        .SendCreatedIdentiCentrosinergijaSummaryEmail(
-                            groupName,
-                            kreiranjeIdenataTaskName,
-                            kreiraniIdentiCentrosinergija,
-                            cancellationTokenSource.Token);
-                }
-
-                transferFileLogger.Info(
-                    groupName,
-                    kreiranjeIdenataTaskName,
-                    "Kreiranje identa u CENTROSINERGIJA bazi je završeno.");
-
-                transferFileLogger.Info(
-                    groupName,
-                    taskName,
-                    "Počinje KIF prenos.");
-
-                await kifTransferService.Transfer(
-                    batchSize,
-                    cancellationTokenSource.Token);
+                await kifTransferService.Transfer(batchSize, cancellationTokenSource.Token);
 
                 if (badRecords.Count > 0)
                 {
@@ -679,15 +532,9 @@ namespace AswTransferToPantheon.Services.Implementation
                             cancellationTokenSource.Token);
                 }
 
-                transferFileLogger.Info(
-                    groupName,
-                    taskName,
-                    "KIF prenos je završen.");
+                transferFileLogger.Info(groupName, taskName, "KIF prenos je završen.");
 
-                transferFileLogger.Info(
-                    groupName,
-                    taskName,
-                    $"END {taskName}.");
+                transferFileLogger.Info(groupName, taskName, $"END {taskName}.");
             }
             catch (Exception exception)
             {
@@ -695,22 +542,78 @@ namespace AswTransferToPantheon.Services.Implementation
                 {
                     var message =
                         $"Kritična greška u tasku {taskName}. " +
-                        "Trenutno izvršavanje se prekida do sledećeg termina.";
+                        "Trenutno izvršavanje se prekida " +
+                        "do sledećeg termina.";
 
-                    await LogCritical(
-                        groupName,
-                        taskName,
-                        message,
-                        exception);
+                    await LogCritical(groupName, taskName, message, exception);
 
-                    throw new CriticalTransferException(
-                        message,
-                        exception);
+                    throw new CriticalTransferException(message,  exception);
                 }
 
                 throw;
             }
         }
+
+        private async Task ExecuteKreiranjeIdenataCentrosinergija(string groupName)
+        {
+            const string taskName = "KreiranjeIdenata";
+
+            var errors = new List<BadRecordInfo>();
+
+            var created = new List<CreatedIdentCentrosinergijaInfo>();
+
+            centrosinergijaKreiranjeIdenataService.LogAction =
+                CreateLogAction( groupName, taskName);
+
+            centrosinergijaKreiranjeIdenataService.ErrorAction =
+                error =>
+                {
+                    transferFileLogger.BadRecord(
+                        groupName,
+                        taskName,
+                        error.TableName,
+                        error.Key,
+                        error.Data,
+                        new Exception(error.Exception));
+
+                    errors.Add(error);
+                };
+
+            centrosinergijaKreiranjeIdenataService
+                .CreatedIdentCentrosinergijaAction =
+                ident =>
+                {
+                    created.Add(ident);
+                };
+
+            transferFileLogger.Info(groupName, taskName, "Počinje kreiranje identa u CENTROSINERGIJA bazi.");
+
+            await centrosinergijaKreiranjeIdenataService.Execute(
+                cancellationTokenSource.Token);
+
+            if (errors.Count > 0)
+            {
+                await emailNotificationService
+                    .SendBadRecordsSummaryEmail(
+                        groupName,
+                        taskName,
+                        errors,
+                        cancellationTokenSource.Token);
+            }
+
+            if (created.Count > 0)
+            {
+                await emailNotificationService
+                    .SendCreatedIdentiCentrosinergijaSummaryEmail(
+                        groupName,
+                        taskName,
+                        created,
+                        cancellationTokenSource.Token);
+            }
+
+            transferFileLogger.Info(groupName, taskName, "Kreiranje identa u CENTROSINERGIJA bazi je završeno.");
+        }
+
         private async Task TransferArtikli(int batchSize, string groupName, string taskName, bool executeDocumentCreation)
         {
             var badRecords = new List<BadRecordInfo>();
@@ -753,34 +656,45 @@ namespace AswTransferToPantheon.Services.Implementation
                     taskName,
                     $"START {taskName}. BatchSize: {batchSize}");
 
-                await artikliTransferService.TransferArtikliPaket(
-                    batchSize,
-                    cancellationTokenSource.Token);
+                await artikliTransferService.TransferArtikliPaket(batchSize, cancellationTokenSource.Token);
+
                 if (badRecords.Count == 0)
                 {
-                    transferFileLogger.Info(
-                        groupName,
-                        "KreiranjeDokumenata_CL_WMS",
-                        "Artikli i cenovnik su završeni. Počinje kreiranje CL_WMS dokumenata.");
-
-                    if (executeDocumentCreation && badRecords.Count == 0)
-                    {
-                        await ExecuteKreiranjeDokumenataClWms(groupName);
-                    }
-                    else if (!executeDocumentCreation)
+                    if (executeDocumentCreation)
                     {
                         transferFileLogger.Info(
                             groupName,
+                            "KreiranjeIdenata",
+                            "Artikli i cenovnik su završeni. " +
+                            "Počinje kreiranje identa u CENTROSINERGIJA bazi.");
+
+                        await ExecuteKreiranjeIdenataCentrosinergija(
+                            groupName);
+
+                        transferFileLogger.Info(
+                            groupName,
                             "KreiranjeDokumenata_CL_WMS",
-                            "Kreiranje CL_WMS dokumenata je isključeno u konfiguraciji.");
+                            "Kreiranje identa je završeno. " +
+                            "Počinje kreiranje CL_WMS dokumenata.");
+
+                        await ExecuteKreiranjeDokumenataClWms(groupName);
+                    }
+                    else
+                    {
+                        transferFileLogger.Info(
+                            groupName,
+                            "Scheduler",
+                            "Kreiranje identa i CL_WMS dokumenata " +
+                            "isključeno je u konfiguraciji.");
                     }
                 }
                 else
                 {
                     transferFileLogger.Info(
                         groupName,
-                        "KreiranjeDokumenata_CL_WMS",
-                        "Kreiranje dokumenata je preskočeno jer postoje neispravni redovi u transferu artikala.");
+                        "Scheduler",
+                        "Kreiranje identa i CL_WMS dokumenata je preskočeno " +
+                        "jer postoje neispravni redovi u transferu Artikala.");
                 }
 
                 if (createdArticles.Count > 0)
