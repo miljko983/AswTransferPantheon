@@ -9,6 +9,7 @@
         RobneGrupe,
         Kif,
         VLPIzvSve,
-        Nalozi
+        Nalozi,
+        Kuf
     }
 }

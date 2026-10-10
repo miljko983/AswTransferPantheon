@@ -5,7 +5,7 @@ namespace AswTransferToPantheon.Services.Interfaces;
 public interface IEmailNotificationService
 {
     Task SendTestEmail(CancellationToken token);
-
+    Task SendApplicationClosingEmail(string reason, CancellationToken token);
     Task SendBadRecordsSummaryEmail(string groupName, string taskName, List<BadRecordInfo> badRecords, CancellationToken token);
 
     Task SendTaskErrorEmail(string groupName, string taskName, string message, Exception exception, CancellationToken token, string notificationKey = "Task.Error");

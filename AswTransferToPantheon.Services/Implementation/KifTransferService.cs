@@ -20,76 +20,73 @@ namespace AswTransferToPantheon.Services.Implementation
 
         public async Task Transfer(int batchSize, CancellationToken token)
         {
-            if (token.IsCancellationRequested)
-            {
-                return;
-            }          
+            token.ThrowIfCancellationRequested();
+            if (batchSize <= 0)
+                throw new ArgumentOutOfRangeException(nameof(batchSize));
 
             long lastId = 0;
             var totalKif = 0;
             var totalStavke = 0;
             var batchNumber = 0;
-            var totalEOtpremnicaSeo = 0;
             var totalAktiviranihIdenata = 0;
 
-            LogAction?.Invoke("KIF - početak prenosa...");
+            LogAction?.Invoke("KIF - početak prenosa i osvežavanja eOtpremnicaSEO...");
+            var refreshed = await RefreshTransferredEOtpremniceSeo(token);
+            long totalSeoInserted = refreshed.Inserted;
+            long totalSeoUpdated = refreshed.Updated;
 
-            while (!token.IsCancellationRequested)
+            while (true)
             {
+                token.ThrowIfCancellationRequested();
                 batchNumber++;
-
                 var kifovi = await ReadKifBatch(lastId, batchSize, token);
-
                 if (kifovi.Count == 0)
-                {
                     break;
-                }
 
                 lastId = kifovi.Max(x => x.Id);
-
                 var noviKifovi = await FilterExistingKif(kifovi, token);
-
                 if (noviKifovi.Count == 0)
                 {
                     LogAction?.Invoke($"KIF paket {batchNumber}: nema novih KIF-ova.");
                     continue;
                 }
 
-                var kifIds = noviKifovi
-                    .Select(x => x.Id)
-                    .ToList();
-
+                var kifIds = noviKifovi.Select(x => x.Id).ToList();
                 var kifStavke = await ReadKifStavke(kifIds, token);
                 var kifDatumValute = await ReadKifDatumValute(kifIds, token);
                 var kifKomentari = await ReadKifKomentari(kifIds, token);
                 var vlpZaglavlja = await ReadVlpZaglavlja(kifIds, token);
-                var vlpZaglavljaIds = vlpZaglavlja.Select(x => x.Id).Distinct().ToList();
-                var eOtpremniceSeo = await ReadEOtpremnicaSeo(vlpZaglavljaIds, token);
+                var vlpIds = vlpZaglavlja.Select(x => x.Id).Distinct().ToList();
+                var eOtpremniceSeo = await ReadEOtpremnicaSeo(vlpIds, token);
 
-                LogAction?.Invoke($"KIF paket {batchNumber}: " + $"pročitano {eOtpremniceSeo.Count} eOtpremnicaSEO zapisa.");
-
-                await InsertKifPackage(noviKifovi, kifStavke, kifDatumValute, kifKomentari, vlpZaglavlja, eOtpremniceSeo, token);
-
-                var artikalIds = kifStavke.Select(x => Convert.ToInt64(x.Artikal)).Distinct().ToList();
-
-                var aktivirano = await AktivirajIdentePoKifStavkama(artikalIds, token);
-                totalAktiviranihIdenata += aktivirano;
+                var seoResult = await InsertKifPackage(
+                    noviKifovi, kifStavke, kifDatumValute, kifKomentari,
+                    vlpZaglavlja, eOtpremniceSeo, token);
 
                 totalKif += noviKifovi.Count;
                 totalStavke += kifStavke.Count;
-                totalEOtpremnicaSeo += eOtpremniceSeo.Count;
+                totalSeoInserted += seoResult.Inserted;
+                totalSeoUpdated += seoResult.Updated;
+                LogAction?.Invoke(
+                    $"KIF paket {batchNumber}: ubačeno {noviKifovi.Count} KIF, " +
+                    $"{kifStavke.Count} stavki, {kifDatumValute.Count} datum valute, " +
+                    $"{kifKomentari.Count} komentara, {vlpZaglavlja.Count} VLP zaglavlja. " +
+                    $"eOtpremnicaSEO: novih {seoResult.Inserted}, osveženih {seoResult.Updated}.");
 
-                LogAction?.Invoke($"KIF paket {batchNumber}: " + $"ubačeno {noviKifovi.Count} KIF, " + $"{kifStavke.Count} stavki, " +
-                                  $"{kifDatumValute.Count} datum valute, " + $"{kifKomentari.Count} komentara, " +
-                                  $"{vlpZaglavlja.Count} VLP zaglavlja, " + $"{eOtpremniceSeo.Count} eOtpremnicaSEO zapisa.");
+                var artikalIds = kifStavke
+                    .Select(x => Convert.ToInt64(x.Artikal)).Distinct().ToList();
+                totalAktiviranihIdenata +=
+                    await AktivirajIdentePoKifStavkama(artikalIds, token);
             }
 
-
-            LogAction?.Invoke($"KIF završen. " + $"Ukupno ubačeno: {totalKif} KIF, " + $"{totalStavke} stavki, " + $"{totalEOtpremnicaSeo} eOtpremnicaSEO zapisa.");
-            LogAction?.Invoke($"KIF aktivacija identa završena. " + $"Ukupno aktivirano: {totalAktiviranihIdenata}.");
+            LogAction?.Invoke(
+                $"KIF završen. Ukupno ubačeno: {totalKif} KIF, {totalStavke} stavki. " +
+                $"eOtpremnicaSEO: novih {totalSeoInserted}, osveženih {totalSeoUpdated}.");
+            LogAction?.Invoke(
+                $"KIF aktivacija identa završena. Ukupno aktivirano: {totalAktiviranihIdenata}.");
         }
 
-        
+
 
         private async Task BulkInsertVlpZaglavlja(SqlConnection connection, SqlTransaction transaction, List<VlpZaglavlje> vlpZaglavlja, CancellationToken token)
         {
@@ -382,61 +379,52 @@ namespace AswTransferToPantheon.Services.Implementation
             return result;
         }
 
-        private async Task<List<EOtpremnicaSeo>> ReadEOtpremnicaSeo(List<long> vlpZaglavljaIds, CancellationToken token)
+        private Task<List<EOtpremnicaSeo>> ReadEOtpremnicaSeo(
+            List<long> vlpZaglavljaIds, CancellationToken token)
         {
-            if (vlpZaglavljaIds.Count == 0)
-            {
-                return [];
-            }
+            return ReadEOtpremnicaSeo(vlpZaglavljaIds, bySeoId: false, token);
+        }
 
-            var parameterNames = vlpZaglavljaIds.Select((_, index) => $":vlp{index}").ToList();
-
-            const string datumOd = "2026-09-01";
-
-            var sql = $"""
-                    SELECT
-                        ID,
-                        VLPZAGLAVLJE,
-                        STATUS,
-                        REQUESTID,
-                        EXTDOCUMENTID,
-                        VREME,
-                        KORISNIK,
-                        REQUESTDATE,
-                        PVREQUESTID,
-                        PVREQUESTDATE,
-                        PZREQUESTID,
-                        PZREQUESTDATE
-                    FROM IIS.eOtpremnicaSEO
-                    WHERE VREME >= DATE '{datumOd}'
-                      AND VLPZAGLAVLJE IN ({string.Join(", ", parameterNames)})
-                    ORDER BY
-                        VLPZAGLAVLJE,
-                        ID
-                    """;
-
+        private async Task<List<EOtpremnicaSeo>> ReadEOtpremnicaSeo(
+            List<long> ids, bool bySeoId, CancellationToken token)
+        {
             var result = new List<EOtpremnicaSeo>();
+            if (ids.Count == 0)
+                return result;
 
             await using var connection = new OracleConnection(BuildOracleConnectionString());
+            await connection.OpenAsync(token);
 
-            await connection.OpenAsync();
+            // Postojeći SEO ID-evi osvežavaju se bez datumske granice.
+            // Za otkrivanje zapisa po VLP-u zadržava se postojeći početni datum.
+            var column = bySeoId ? "ID" : "VLPZAGLAVLJE";
+            var dateFilter = bySeoId ? string.Empty : "AND VREME >= DATE '2026-09-01'";
 
-            await using var command = connection.CreateCommand();
-
-            command.CommandText = sql;
-            command.BindByName = true;
-
-            for (var i = 0; i < vlpZaglavljaIds.Count; i++)
+            foreach (var chunk in ids.Distinct().OrderBy(x => x).Chunk(500))
             {
-                command.Parameters.Add($"vlp{i}", OracleDbType.Int64).Value = vlpZaglavljaIds[i];
-            }
+                token.ThrowIfCancellationRequested();
+                var parameters = chunk.Select((_, i) => $":id{i}").ToArray();
+                await using var command = connection.CreateCommand();
+                command.BindByName = true;
+                command.CommandTimeout = 120;
+                command.CommandText = $"""
+                    SELECT
+                        ID, VLPZAGLAVLJE, STATUS, REQUESTID, EXTDOCUMENTID,
+                        VREME, KORISNIK, REQUESTDATE, PVREQUESTID, PVREQUESTDATE,
+                        PZREQUESTID, PZREQUESTDATE
+                    FROM IIS.eOtpremnicaSEO
+                    WHERE {column} IN ({string.Join(", ", parameters)})
+                      {dateFilter}
+                    ORDER BY ID
+                    """;
 
-            await using var reader = await command.ExecuteReaderAsync(token);
+                for (var i = 0; i < chunk.Length; i++)
+                    command.Parameters.Add($"id{i}", OracleDbType.Int64).Value = chunk[i];
 
-            while (await reader.ReadAsync(token))
-            {
-                result.Add(
-                    new EOtpremnicaSeo
+                await using var reader = await command.ExecuteReaderAsync(token);
+                while (await reader.ReadAsync(token))
+                {
+                    result.Add(new EOtpremnicaSeo
                     {
                         Id = GetInt64(reader, "ID"),
                         VlpZaglavlje = GetInt64(reader, "VLPZAGLAVLJE"),
@@ -451,10 +439,13 @@ namespace AswTransferToPantheon.Services.Implementation
                         PzRequestId = GetString(reader, "PZREQUESTID"),
                         PzRequestDate = GetDateTime(reader, "PZREQUESTDATE")
                     });
+                }
             }
-
             return result;
         }
+
+
+
         private async Task<List<KifKomentar>> ReadKifKomentari(List<long> kifIds, CancellationToken token)
         {
             if (kifIds.Count == 0)
@@ -518,7 +509,7 @@ namespace AswTransferToPantheon.Services.Implementation
                 .Select((_, index) => $":kif{index}")
                 .ToList();
 
-                var sql = $"""
+            var sql = $"""
                     SELECT
                         ID,
                         KIF,
@@ -559,7 +550,7 @@ namespace AswTransferToPantheon.Services.Implementation
             return result;
         }
 
-        private async Task BulkInsertKifDatumValute( SqlConnection connection, SqlTransaction transaction, List<KifDatumValute> kifDatumValute, CancellationToken token)
+        private async Task BulkInsertKifDatumValute(SqlConnection connection, SqlTransaction transaction, List<KifDatumValute> kifDatumValute, CancellationToken token)
         {
             if (kifDatumValute.Count == 0)
             {
@@ -651,31 +642,36 @@ namespace AswTransferToPantheon.Services.Implementation
                 .ToList();
         }
 
-        private async Task InsertKifPackage( List<Kif> kifovi, List<KifStavka> kifStavke, List<KifDatumValute> kifDatumValute, List<KifKomentar> kifKomentari, 
-                                             List<VlpZaglavlje> vlpZaglavlja, List<EOtpremnicaSeo> eOtpremniceSeo, CancellationToken token)
+        private async Task<(int Inserted, int Updated)> InsertKifPackage(
+            List<Kif> kifovi, List<KifStavka> kifStavke,
+            List<KifDatumValute> kifDatumValute, List<KifKomentar> kifKomentari,
+            List<VlpZaglavlje> vlpZaglavlja, List<EOtpremnicaSeo> eOtpremniceSeo,
+            CancellationToken token)
         {
             await using var connection = new SqlConnection(connectionStrings.Transfer);
             await connection.OpenAsync(token);
-
-            await using var transaction = await connection.BeginTransactionAsync(token);
-
+            await using var transaction =
+                (SqlTransaction)await connection.BeginTransactionAsync(token);
             try
             {
-                await BulkInsertKif(connection, (SqlTransaction)transaction, kifovi, token);
-                await BulkInsertKifStavke(connection, (SqlTransaction)transaction, kifStavke, token);
-                await BulkInsertKifDatumValute(connection, (SqlTransaction)transaction, kifDatumValute, token);
-                await BulkInsertKifKomentari(connection, (SqlTransaction)transaction, kifKomentari, token);
-                await BulkInsertVlpZaglavlja(connection, (SqlTransaction)transaction, vlpZaglavlja, token);
-                await BulkInsertEOtpremnicaSeo(connection, (SqlTransaction)transaction, eOtpremniceSeo, token);
-
+                await BulkInsertKif(connection, transaction, kifovi, token);
+                await BulkInsertKifStavke(connection, transaction, kifStavke, token);
+                await BulkInsertKifDatumValute(connection, transaction, kifDatumValute, token);
+                await BulkInsertKifKomentari(connection, transaction, kifKomentari, token);
+                await BulkInsertVlpZaglavlja(connection, transaction, vlpZaglavlja, token);
+                var result = await BulkInsertEOtpremnicaSeo(
+                    connection, transaction, eOtpremniceSeo, token);
                 await transaction.CommitAsync(token);
+                return result;
             }
             catch
             {
-                await transaction.RollbackAsync(token);
+                await transaction.RollbackAsync(CancellationToken.None);
                 throw;
             }
         }
+
+
 
         private async Task BulkInsertKifKomentari(SqlConnection connection, SqlTransaction transaction, List<KifKomentar> kifKomentari, CancellationToken token)
         {
@@ -753,11 +749,11 @@ namespace AswTransferToPantheon.Services.Implementation
             {
                 bulkCopy.ColumnMappings.Add(column.ColumnName, column.ColumnName);
             }
-          
+
             await bulkCopy.WriteToServerAsync(table);
         }
 
-        
+
         private async Task BulkInsertKif(SqlConnection connection, SqlTransaction transaction, List<Kif> kifovi, CancellationToken token)
         {
             if (kifovi.Count == 0)
@@ -1004,7 +1000,7 @@ namespace AswTransferToPantheon.Services.Implementation
             await command.ExecuteNonQueryAsync(token);
         }
 
-        
+
         private async Task BulkInsertKifTmp(SqlConnection connection, SqlTransaction transaction, List<Kif> kifovi, CancellationToken token)
         {
             var table = CreateKifDataTable(kifovi);
@@ -1279,32 +1275,187 @@ namespace AswTransferToPantheon.Services.Implementation
             return reader.IsDBNull(ordinal) ? null : Convert.ToDecimal(reader.GetValue(ordinal));
         }
 
-        private async Task BulkInsertEOtpremnicaSeo(SqlConnection connection, SqlTransaction transaction, List<EOtpremnicaSeo> eOtpremniceSeo, CancellationToken token)
+        private async Task<(int Inserted, int Updated)> BulkInsertEOtpremnicaSeo(
+            SqlConnection connection, SqlTransaction transaction,
+            List<EOtpremnicaSeo> eOtpremniceSeo, CancellationToken token)
         {
             if (eOtpremniceSeo.Count == 0)
-            {
-                return;
-            }
+                return (0, 0);
+
+            var duplicate = eOtpremniceSeo.GroupBy(x => x.Id)
+                .FirstOrDefault(group => group.Count() > 1);
+            if (duplicate != null)
+                throw new InvalidOperationException(
+                    $"ASW eOtpremnicaSEO sadrži više redova sa istim ID={duplicate.Key}. " +
+                    "Paket nije sinhronizovan; potrebno je proveriti izvorne podatke.");
 
             var table = CreateEOtpremnicaSeoDataTable(eOtpremniceSeo);
-
-            using var bulkCopy = new SqlBulkCopy(connection, SqlBulkCopyOptions.CheckConstraints, transaction);
-
-            bulkCopy.DestinationTableName = "dbo._tb_EotpremnicaSeo";
-
-            bulkCopy.BatchSize = eOtpremniceSeo.Count;
-
-            bulkCopy.BulkCopyTimeout = 60;
-
-            foreach (DataColumn column in table.Columns)
+            using (var createCommand = connection.CreateCommand())
             {
-                bulkCopy.ColumnMappings.Add(column.ColumnName, column.ColumnName);
+                createCommand.Transaction = transaction;
+                createCommand.CommandTimeout = 60;
+                createCommand.CommandText = """
+                    SELECT TOP (0)
+                        ID, VLPZAGLAVLJE, STATUS, REQUESTID, EXTDOCUMENTID,
+                        VREME, KORISNIK, REQUESTDATE, PVREQUESTID, PVREQUESTDATE,
+                        PZREQUESTID, PZREQUESTDATE
+                    INTO #EOtpremnicaSeoSync
+                    FROM dbo._tb_EotpremnicaSeo;
+
+                    CREATE UNIQUE CLUSTERED INDEX IX_EOtpremnicaSeoSync_ID
+                        ON #EOtpremnicaSeoSync (ID);
+                    """;
+                await createCommand.ExecuteNonQueryAsync(token);
             }
 
-            await bulkCopy.WriteToServerAsync(table);
+            using (var bulkCopy = new SqlBulkCopy(
+                connection,
+                SqlBulkCopyOptions.CheckConstraints | SqlBulkCopyOptions.KeepIdentity,
+                transaction))
+            {
+                bulkCopy.DestinationTableName = "#EOtpremnicaSeoSync";
+                bulkCopy.BatchSize = eOtpremniceSeo.Count;
+                bulkCopy.BulkCopyTimeout = 60;
+                foreach (DataColumn column in table.Columns)
+                    bulkCopy.ColumnMappings.Add(column.ColumnName, column.ColumnName);
+                await bulkCopy.WriteToServerAsync(table, token);
+            }
+
+            using var command = connection.CreateCommand();
+            command.Transaction = transaction;
+            command.CommandTimeout = 120;
+            command.CommandText = """
+                DECLARE @Updated int, @Inserted int;
+
+                UPDATE t
+                SET STATUS = s.STATUS
+                FROM dbo._tb_EotpremnicaSeo AS t WITH (UPDLOCK, HOLDLOCK)
+                INNER JOIN #EOtpremnicaSeoSync AS s
+                    ON s.ID = t.ID
+                WHERE EXISTS
+                (
+                    SELECT t.STATUS
+                    EXCEPT
+                    SELECT s.STATUS
+                );
+
+                SET @Updated = @@ROWCOUNT;
+
+                INSERT INTO dbo._tb_EotpremnicaSeo
+                (
+                    ID, VLPZAGLAVLJE, STATUS, REQUESTID, EXTDOCUMENTID,
+                    VREME, KORISNIK, REQUESTDATE, PVREQUESTID, PVREQUESTDATE,
+                    PZREQUESTID, PZREQUESTDATE
+                )
+                SELECT
+                    s.ID, s.VLPZAGLAVLJE, s.STATUS, s.REQUESTID, s.EXTDOCUMENTID,
+                    s.VREME, s.KORISNIK, s.REQUESTDATE, s.PVREQUESTID, s.PVREQUESTDATE,
+                    s.PZREQUESTID, s.PZREQUESTDATE
+                FROM #EOtpremnicaSeoSync AS s
+                WHERE NOT EXISTS
+                (
+                    SELECT 1
+                    FROM dbo._tb_EotpremnicaSeo AS t WITH (UPDLOCK, HOLDLOCK)
+                    WHERE t.ID = s.ID
+                );
+                SET @Inserted = @@ROWCOUNT;
+
+                DROP TABLE #EOtpremnicaSeoSync;
+                SELECT @Inserted AS Inserted, @Updated AS Updated;
+                """;
+
+            await using var reader = await command.ExecuteReaderAsync(token);
+            if (!await reader.ReadAsync(token))
+                throw new InvalidOperationException("Nedostaje rezultat sinhronizacije eOtpremnicaSEO.");
+            return (reader.GetInt32(0), reader.GetInt32(1));
         }
 
-        private DataTable CreateEOtpremnicaSeoDataTable( List<EOtpremnicaSeo> eOtpremniceSeo)
+        private async Task<(long Inserted, long Updated)> RefreshTransferredEOtpremniceSeo(
+            CancellationToken token)
+        {
+            long totalInserted = 0;
+            long totalUpdated = 0;
+            await using var connection = new SqlConnection(connectionStrings.Transfer);
+            await connection.OpenAsync(token);
+
+            // Prvo svi postojeći SEO ID-evi, čak i ako se promenila VLP veza.
+            // Zatim naknadno nastali SEO zapisi uz već preneta VLP zaglavlja.
+            foreach (var bySeoId in new[] { true, false })
+            {
+                var sourceTable = bySeoId ? "dbo._tb_EotpremnicaSeo" : "dbo.VLPZAGLAVLJA";
+                var phase = bySeoId ? "postojeći SEO ID-evi" : "preneta VLP zaglavlja";
+                long upperId;
+                using (var maxCommand = connection.CreateCommand())
+                {
+                    maxCommand.CommandTimeout = 120;
+                    maxCommand.CommandText = $"SELECT COALESCE(MAX(ID), 0) FROM {sourceTable};";
+                    upperId = Convert.ToInt64(await maxCommand.ExecuteScalarAsync(token));
+                }
+
+                long lastId = 0;
+                var batchNumber = 0;
+                while (lastId < upperId)
+                {
+                    token.ThrowIfCancellationRequested();
+                    var ids = new List<long>();
+                    using (var idCommand = connection.CreateCommand())
+                    {
+                        idCommand.CommandTimeout = 120;
+                        idCommand.CommandText = $"""
+                            SELECT DISTINCT TOP (500) ID
+                            FROM {sourceTable}
+                            WHERE ID > @LastId AND ID <= @UpperId
+                            ORDER BY ID;
+                            """;
+                        idCommand.Parameters.Add("@LastId", SqlDbType.BigInt).Value = lastId;
+                        idCommand.Parameters.Add("@UpperId", SqlDbType.BigInt).Value = upperId;
+                        await using var reader = await idCommand.ExecuteReaderAsync(token);
+                        while (await reader.ReadAsync(token))
+                            ids.Add(Convert.ToInt64(reader["ID"]));
+                    }
+
+                    if (ids.Count == 0)
+                        break;
+                    lastId = ids[^1];
+                    batchNumber++;
+                    var items = await ReadEOtpremnicaSeo(ids, bySeoId, token);
+                    if (items.Count == 0)
+                    {
+                        LogAction?.Invoke($"eOtpremnicaSEO - {phase}, paket {batchNumber}: nema izvornih zapisa.");
+                        continue;
+                    }
+
+                    await using var transaction =
+                        (SqlTransaction)await connection.BeginTransactionAsync(token);
+                    (int Inserted, int Updated) result;
+                    try
+                    {
+                        result = await BulkInsertEOtpremnicaSeo(connection, transaction, items, token);
+                        await transaction.CommitAsync(token);
+                    }
+                    catch
+                    {
+                        await transaction.RollbackAsync(CancellationToken.None);
+                        throw;
+                    }
+
+                    totalInserted += result.Inserted;
+                    totalUpdated += result.Updated;
+                    LogAction?.Invoke(
+                        $"eOtpremnicaSEO - {phase}, paket {batchNumber}: " +
+                        $"pročitano {items.Count}, novih {result.Inserted}, osveženih {result.Updated}.");
+                }
+            }
+
+            LogAction?.Invoke(
+                $"Osvežavanje prenetih eOtpremnicaSEO završeno: " +
+                $"novih {totalInserted}, osveženih {totalUpdated}.");
+            return (totalInserted, totalUpdated);
+        }
+
+
+
+        private DataTable CreateEOtpremnicaSeoDataTable(List<EOtpremnicaSeo> eOtpremniceSeo)
         {
             var table = new DataTable();
 
@@ -1339,7 +1490,7 @@ namespace AswTransferToPantheon.Services.Implementation
             }
 
             return table;
-        }        
+        }
 
         private async Task<int> AktivirajIdentePoKifStavkama(IReadOnlyCollection<long> artikalIds, CancellationToken token)
         {

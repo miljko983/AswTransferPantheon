@@ -14,6 +14,7 @@ namespace AswTransferToPantheon.Services.Implementation
         private static readonly object TaskLock = new object();
         private readonly IOptions<SchedulerConfiguration> schedulerConfiguration;
         private readonly IKifTransferService kifTransferService;
+        private readonly IKufTransferService kufTransferService;
         private Dictionary<string, DateTime> executionTimes = null!;
         private readonly CancellationTokenSource cancellationTokenSource = new CancellationTokenSource();
         private readonly IArtikliTransferService artikliTransferService;
@@ -29,6 +30,7 @@ namespace AswTransferToPantheon.Services.Implementation
 
         public TaskSchedulerService(IOptions<SchedulerConfiguration> schedulerConfiguration,
                                     IKifTransferService kifTransferService,
+                                    IKufTransferService kufTransferService,
                                     IArtikliTransferService artikliTransferService,
                                     IVlpIzvSveTransferService vlpIzvSveTransferService,
                                     INaloziTransferService naloziTransferService,
@@ -39,6 +41,7 @@ namespace AswTransferToPantheon.Services.Implementation
         {
             this.schedulerConfiguration = schedulerConfiguration;
             this.kifTransferService = kifTransferService;
+            this.kufTransferService = kufTransferService;
             this.artikliTransferService = artikliTransferService;
             this.vlpIzvSveTransferService = vlpIzvSveTransferService;
             this.naloziTransferService = naloziTransferService;
@@ -92,7 +95,10 @@ namespace AswTransferToPantheon.Services.Implementation
                 var difference = nextTime.Subtract(DateTime.Now);
                 LogAction?.Invoke($"Scheduled periodic task {pt.Name} for {nextTime}.");
 
-                await Task.Delay(difference, cancellationTokenSource.Token);
+                if (difference > TimeSpan.Zero)
+                {
+                    await Task.Delay(difference, cancellationTokenSource.Token);
+                }
 
                 LogAction?.Invoke($"Executing tasks for {pt.Name}...");
 
@@ -113,11 +119,15 @@ namespace AswTransferToPantheon.Services.Implementation
             }
             catch (Exception exc)
             {
+                var failedTaskName = pt.Tasks.Count == 1 && pt.Tasks[0] == TaskType.Kuf
+                    ? nameof(TaskType.Kuf)
+                    : "Scheduler";
+
                 if (TransferErrorHelper.IsCriticalError(exc))
                 {
                     await LogCritical(
                         groupName,
-                        "Scheduler",
+                        failedTaskName,
                         $"Critical error executing periodic task {pt.Name}.",
                         exc);
                 }
@@ -125,7 +135,7 @@ namespace AswTransferToPantheon.Services.Implementation
                 {
                     LogError(
                         groupName,
-                        "Scheduler",
+                        failedTaskName,
                         $"Error executing periodic task {pt.Name}.",
                         exc);
                 }
@@ -258,7 +268,7 @@ namespace AswTransferToPantheon.Services.Implementation
         }
 
         private Task ScheduleDailyTask(DailyTask dtc, bool firstTime)
-        {            
+        {
             DateTime lastExecution;
             executionTimes.TryGetValue(dtc.Name, out lastExecution);
 
@@ -277,7 +287,7 @@ namespace AswTransferToPantheon.Services.Implementation
             return Task.CompletedTask;
         }
 
-        
+
 
         private async Task ScheduleNextDaily(DailyTask dtc, DateTime nextTime)
         {
@@ -415,7 +425,8 @@ namespace AswTransferToPantheon.Services.Implementation
             {
                 case TaskType.Artikli: return TransferArtikli(batchSize, groupName, nameof(TaskType.Artikli), executeDocumentCreation);
                 case TaskType.Kif: return TransferKif(batchSize, groupName, nameof(TaskType.Kif));
-                case TaskType.VLPIzvSve: return TransferVlpIzvSve(batchSize,  daysBack,  groupName,  nameof(TaskType.VLPIzvSve));
+                case TaskType.Kuf: return TransferKuf(batchSize, groupName, nameof(TaskType.Kuf));
+                case TaskType.VLPIzvSve: return TransferVlpIzvSve(batchSize, daysBack, groupName, nameof(TaskType.VLPIzvSve));
                 default: return Task.CompletedTask;
             }
         }
@@ -488,7 +499,7 @@ namespace AswTransferToPantheon.Services.Implementation
         {
             var badRecords = new List<BadRecordInfo>();
 
-            kifTransferService.LogAction = CreateLogAction(groupName,taskName);
+            kifTransferService.LogAction = CreateLogAction(groupName, taskName);
 
             kifTransferService.BadRecordAction =
                 (table, key, data, message, exception) =>
@@ -547,7 +558,77 @@ namespace AswTransferToPantheon.Services.Implementation
 
                     await LogCritical(groupName, taskName, message, exception);
 
-                    throw new CriticalTransferException(message,  exception);
+                    throw new CriticalTransferException(message, exception);
+                }
+
+                throw;
+            }
+        }
+
+        private async Task TransferKuf(int batchSize, string groupName, string taskName)
+        {
+            var badRecords = new List<BadRecordInfo>();
+
+            kufTransferService.LogAction = CreateLogAction(groupName, taskName);
+
+            kufTransferService.BadRecordAction =
+                (table, key, data, message, exception) =>
+                {
+                    transferFileLogger.BadRecord(
+                        groupName,
+                        taskName,
+                        table,
+                        key,
+                        data,
+                        exception);
+
+                    badRecords.Add(
+                        new BadRecordInfo
+                        {
+                            TableName = table,
+                            Key = key,
+                            Data = data,
+                            Message = message,
+                            Exception = exception.Message
+                        });
+                };
+
+            try
+            {
+                transferFileLogger.Info(
+                    groupName,
+                    taskName,
+                    $"START {taskName}. " +
+                    $"BatchSize: {batchSize}");
+
+                await kufTransferService.Transfer(batchSize, cancellationTokenSource.Token);
+
+                if (badRecords.Count > 0)
+                {
+                    await emailNotificationService
+                        .SendBadRecordsSummaryEmail(
+                            groupName,
+                            taskName,
+                            badRecords,
+                            cancellationTokenSource.Token);
+                }
+
+                transferFileLogger.Info(groupName, taskName, "KUF prenos je završen.");
+
+                transferFileLogger.Info(groupName, taskName, $"END {taskName}.");
+            }
+            catch (Exception exception)
+            {
+                if (TransferErrorHelper.IsCriticalError(exception))
+                {
+                    var message =
+                        $"Kritična greška u tasku {taskName}. " +
+                        "Trenutno izvršavanje se prekida " +
+                        "do sledećeg termina.";
+
+                    await LogCritical(groupName, taskName, message, exception);
+
+                    throw new CriticalTransferException(message, exception);
                 }
 
                 throw;
@@ -563,7 +644,7 @@ namespace AswTransferToPantheon.Services.Implementation
             var created = new List<CreatedIdentCentrosinergijaInfo>();
 
             centrosinergijaKreiranjeIdenataService.LogAction =
-                CreateLogAction( groupName, taskName);
+                CreateLogAction(groupName, taskName);
 
             centrosinergijaKreiranjeIdenataService.ErrorAction =
                 error =>
@@ -800,7 +881,10 @@ namespace AswTransferToPantheon.Services.Implementation
             {
                 try
                 {
-                    await emailNotificationService.SendTaskErrorEmail(groupName, taskName, message, exception,cancellationTokenSource.Token);
+                    await emailNotificationService.SendTaskErrorEmail(
+                        groupName, taskName, message, exception,
+                        cancellationTokenSource.Token,
+                        "Task.Error");
                 }
                 catch (Exception emailException)
                 {
@@ -885,18 +969,18 @@ namespace AswTransferToPantheon.Services.Implementation
             vlpIzvSveTransferService.LogAction = CreateLogAction(groupName, taskName);
 
             vlpIzvSveTransferService.BadRecordAction = (table, key, data, message, ex) =>
-                {
-                    transferFileLogger.BadRecord(groupName, taskName, table, key, data, ex);
+            {
+                transferFileLogger.BadRecord(groupName, taskName, table, key, data, ex);
 
-                    badRecords.Add(new BadRecordInfo
-                    {
-                        TableName = table,
-                        Key = key,
-                        Message = message,
-                        Data = data,
-                        Exception = ex.Message
-                    });
-                };
+                badRecords.Add(new BadRecordInfo
+                {
+                    TableName = table,
+                    Key = key,
+                    Message = message,
+                    Data = data,
+                    Exception = ex.Message
+                });
+            };
 
             try
             {
@@ -907,7 +991,7 @@ namespace AswTransferToPantheon.Services.Implementation
                 if (badRecords.Count > 0)
                 {
                     await emailNotificationService.SendBadRecordsSummaryEmail(groupName, taskName, badRecords, cancellationTokenSource.Token);
-                }                
+                }
 
                 transferFileLogger.Info(groupName, taskName, $"END {taskName}.");
             }
@@ -927,7 +1011,7 @@ namespace AswTransferToPantheon.Services.Implementation
                 throw;
             }
         }
-       
+
 
     }
 }

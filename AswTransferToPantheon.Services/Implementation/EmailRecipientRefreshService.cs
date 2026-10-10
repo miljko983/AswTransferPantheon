@@ -16,16 +16,21 @@ public sealed class EmailRecipientRefreshService : BackgroundService
         this.logger = logger;
     }
 
-    protected override async Task ExecuteAsync(
-        CancellationToken stoppingToken)
+    public override async Task StartAsync(CancellationToken cancellationToken)
     {
-        await RefreshSafely(stoppingToken);
+        await RefreshSafely(cancellationToken);
 
+        await base.StartAsync(cancellationToken);
+    }
+
+    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+    {
         while (!stoppingToken.IsCancellationRequested)
         {
             var now = DateTime.Now;
 
-            var nextRefresh = now.Date.AddHours(6);
+            var nextRefresh =
+                now.Date.AddHours(6);
 
             if (nextRefresh <= now)
             {
@@ -34,7 +39,9 @@ public sealed class EmailRecipientRefreshService : BackgroundService
 
             var delay = nextRefresh - now;
 
-            await Task.Delay(delay, stoppingToken);
+            await Task.Delay(
+                delay,
+                stoppingToken);
 
             await RefreshSafely(stoppingToken);
         }

@@ -475,4 +475,43 @@ public sealed class EmailNotificationService : IEmailNotificationService
 
         return builder.ToString();
     }
+
+    public Task SendApplicationClosingEmail(
+    string reason,
+    CancellationToken token)
+    {
+        if (!TryGetNotification("Task.ApplicationClosing", out var notification))
+        {
+            return Task.CompletedTask;
+        }
+
+        var windowsUser =
+            $"{Environment.UserDomainName}\\{Environment.UserName}";
+
+        var body = $"""
+        <html>
+        <body>
+            <h3>ASW Transfer aplikacija se zatvara</h3>
+
+            <p><b>Vreme:</b>
+                {DateTimeOffset.Now:dd.MM.yyyy HH:mm:ss zzz}
+            </p>
+
+            <p><b>Računar:</b>
+                {HtmlEncoder.Default.Encode(Environment.MachineName)}
+            </p>
+
+            <p><b>Windows korisnik:</b>
+                {HtmlEncoder.Default.Encode(windowsUser)}
+            </p>
+
+            <p><b>Razlog:</b>
+                {HtmlEncoder.Default.Encode(reason)}
+            </p>
+        </body>
+        </html>
+        """;
+
+        return SendEmail(notification.Subject, body, "Task", token);
+    }
 }
