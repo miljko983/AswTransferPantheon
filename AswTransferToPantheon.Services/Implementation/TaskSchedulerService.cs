@@ -11,6 +11,7 @@ namespace AswTransferToPantheon.Services.Implementation
     public class TaskSchedulerService : ITaskSchedulerService
     {
         private const string ExecutionTimesPath = "executiontimes.json";
+        private const string FailedTaskNameKey = "TransferTaskName";
         private static readonly object TaskLock = new object();
         private readonly IOptions<SchedulerConfiguration> schedulerConfiguration;
         private readonly IKifTransferService kifTransferService;
@@ -53,9 +54,11 @@ namespace AswTransferToPantheon.Services.Implementation
 
         public Task ScheduleTasks()
         {
-            _ = ScheduleDailyTasks(schedulerConfiguration.Value.DailyTasks);
-            _ = SchedulePeriodicTasks(schedulerConfiguration.Value.PeriodicTasks);
-            _ = ScheduleNaloziTasks(schedulerConfiguration.Value.NaloziTasks);
+            var configuration = schedulerConfiguration.Value;
+            // Transferi i njihovi nastavci ne treba da zauzimaju nit prozora.
+            _ = Task.Run(() => ScheduleDailyTasks(configuration.DailyTasks));
+            _ = Task.Run(() => SchedulePeriodicTasks(configuration.PeriodicTasks));
+            _ = Task.Run(() => ScheduleNaloziTasks(configuration.NaloziTasks));
             return Task.CompletedTask;
         }
 
@@ -63,6 +66,11 @@ namespace AswTransferToPantheon.Services.Implementation
         {
             foreach (var pt in periodicTasks)
             {
+                if (pt.Tasks.Count > 0 && pt.Tasks.All(task => task == TaskType.Kuf))
+                {
+                    LogAction?.Invoke($"Zaseban raspored {pt.Name} je preskočen: KUF/VLPKUF se prenosi uz naloge.");
+                    continue;
+                }
                 _ = SchedulePeriodicTask(pt, true);
             }
 
@@ -189,7 +197,10 @@ namespace AswTransferToPantheon.Services.Implementation
 
                 transferFileLogger.Info(groupName, "Scheduler", $"Scheduled Nalozi task {naloziTask.Name} for {nextTime}.");
 
-                await Task.Delay(difference, cancellationTokenSource.Token);
+                if (difference > TimeSpan.Zero)
+                {
+                    await Task.Delay(difference, cancellationTokenSource.Token);
+                }
 
                 transferFileLogger.Info(groupName, "Scheduler", $"Executing Nalozi task {naloziTask.Name}.");
 
@@ -207,13 +218,14 @@ namespace AswTransferToPantheon.Services.Implementation
             }
             catch (Exception exception)
             {
+                var failedTaskName = exception.Data[FailedTaskNameKey] as string ?? naloziTask.Name;
                 if (TransferErrorHelper.IsCriticalError(exception))
                 {
-                    await LogCritical(groupName, naloziTask.Name, $"Critical error executing Nalozi task {naloziTask.Name}.", exception);
+                    await LogCritical(groupName, failedTaskName, $"Critical error executing task {failedTaskName} in Nalozi schedule {naloziTask.Name}.", exception);
                 }
                 else
                 {
-                    LogError(groupName, naloziTask.Name, $"Error executing Nalozi task {naloziTask.Name}.", exception);
+                    LogError(groupName, failedTaskName, $"Error executing task {failedTaskName} in Nalozi schedule {naloziTask.Name}.", exception);
                 }
             }
             finally
@@ -425,7 +437,9 @@ namespace AswTransferToPantheon.Services.Implementation
             {
                 case TaskType.Artikli: return TransferArtikli(batchSize, groupName, nameof(TaskType.Artikli), executeDocumentCreation);
                 case TaskType.Kif: return TransferKif(batchSize, groupName, nameof(TaskType.Kif));
-                case TaskType.Kuf: return TransferKuf(batchSize, groupName, nameof(TaskType.Kuf));
+                case TaskType.Kuf:
+                    LogAction?.Invoke("Samostalan KUF je preskočen: KUF/VLPKUF se prenosi uz naloge.");
+                    return Task.CompletedTask;
                 case TaskType.VLPIzvSve: return TransferVlpIzvSve(batchSize, daysBack, groupName, nameof(TaskType.VLPIzvSve));
                 default: return Task.CompletedTask;
             }
@@ -436,8 +450,31 @@ namespace AswTransferToPantheon.Services.Implementation
             var groupName = Path.Combine("NaloziTasks", naloziTask.Name);
 
             var taskName = naloziTask.Name;
+            var activeTaskName = taskName;
 
             var badRecords = new List<BadRecordInfo>();
+            var kufBadRecords = new List<BadRecordInfo>();
+
+            kufTransferService.LogAction = CreateLogAction(groupName, nameof(TaskType.Kuf));
+            kufTransferService.BadRecordAction = (table, key, data, message, exception) =>
+            {
+                transferFileLogger.BadRecord(
+                    groupName, nameof(TaskType.Kuf), table, key, data, exception);
+                kufBadRecords.Add(new BadRecordInfo
+                {
+                    TableName = table,
+                    Key = key,
+                    Data = data,
+                    Message = message,
+                    Exception = exception.Message
+                });
+            };
+            naloziTransferService.KufTransferAction = async (nalogIds, token) =>
+            {
+                activeTaskName = nameof(TaskType.Kuf);
+                await kufTransferService.TransferForNalozi(nalogIds, naloziTask.BatchSize, token);
+                activeTaskName = taskName;
+            };
 
             naloziTransferService.LogAction = CreateLogAction(groupName, taskName);
 
@@ -473,6 +510,14 @@ namespace AswTransferToPantheon.Services.Implementation
 
                 await naloziTransferService.Transfer(naloziTask.BatchSize, naloziTask.DateFrom, cancellationTokenSource.Token);
 
+                if (kufBadRecords.Count > 0)
+                {
+                    activeTaskName = nameof(TaskType.Kuf);
+                    await emailNotificationService.SendBadRecordsSummaryEmail(
+                        groupName, nameof(TaskType.Kuf), kufBadRecords, cancellationTokenSource.Token);
+                    activeTaskName = taskName;
+                }
+
                 if (badRecords.Count > 0)
                 {
                     await emailNotificationService.SendBadRecordsSummaryEmail(groupName, taskName, badRecords, cancellationTokenSource.Token);
@@ -482,16 +527,21 @@ namespace AswTransferToPantheon.Services.Implementation
             }
             catch (Exception exception)
             {
+                exception.Data[FailedTaskNameKey] = activeTaskName;
                 if (TransferErrorHelper.IsCriticalError(exception))
                 {
-                    var message = $"Kritična greška u tasku {taskName}. " + "Trenutno izvršavanje se prekida do sledećeg termina.";
+                    var message = $"Kritična greška u tasku {activeTaskName}. " + "Trenutno izvršavanje se prekida do sledećeg termina.";
 
-                    await LogCritical(groupName, taskName, message, exception);
+                    await LogCritical(groupName, activeTaskName, message, exception);
 
                     throw new CriticalTransferException(message, exception);
                 }
 
                 throw;
+            }
+            finally
+            {
+                naloziTransferService.KufTransferAction = null;
             }
         }
 
@@ -544,76 +594,6 @@ namespace AswTransferToPantheon.Services.Implementation
                 }
 
                 transferFileLogger.Info(groupName, taskName, "KIF prenos je završen.");
-
-                transferFileLogger.Info(groupName, taskName, $"END {taskName}.");
-            }
-            catch (Exception exception)
-            {
-                if (TransferErrorHelper.IsCriticalError(exception))
-                {
-                    var message =
-                        $"Kritična greška u tasku {taskName}. " +
-                        "Trenutno izvršavanje se prekida " +
-                        "do sledećeg termina.";
-
-                    await LogCritical(groupName, taskName, message, exception);
-
-                    throw new CriticalTransferException(message, exception);
-                }
-
-                throw;
-            }
-        }
-
-        private async Task TransferKuf(int batchSize, string groupName, string taskName)
-        {
-            var badRecords = new List<BadRecordInfo>();
-
-            kufTransferService.LogAction = CreateLogAction(groupName, taskName);
-
-            kufTransferService.BadRecordAction =
-                (table, key, data, message, exception) =>
-                {
-                    transferFileLogger.BadRecord(
-                        groupName,
-                        taskName,
-                        table,
-                        key,
-                        data,
-                        exception);
-
-                    badRecords.Add(
-                        new BadRecordInfo
-                        {
-                            TableName = table,
-                            Key = key,
-                            Data = data,
-                            Message = message,
-                            Exception = exception.Message
-                        });
-                };
-
-            try
-            {
-                transferFileLogger.Info(
-                    groupName,
-                    taskName,
-                    $"START {taskName}. " +
-                    $"BatchSize: {batchSize}");
-
-                await kufTransferService.Transfer(batchSize, cancellationTokenSource.Token);
-
-                if (badRecords.Count > 0)
-                {
-                    await emailNotificationService
-                        .SendBadRecordsSummaryEmail(
-                            groupName,
-                            taskName,
-                            badRecords,
-                            cancellationTokenSource.Token);
-                }
-
-                transferFileLogger.Info(groupName, taskName, "KUF prenos je završen.");
 
                 transferFileLogger.Info(groupName, taskName, $"END {taskName}.");
             }
@@ -860,7 +840,21 @@ namespace AswTransferToPantheon.Services.Implementation
 
         public void CancelTasks()
         {
-            cancellationTokenSource.Cancel();
+            _ = CancelTasksSafelyAsync();
+        }
+
+        private async Task CancelTasksSafelyAsync()
+        {
+            try
+            {
+                // Zahtev za prekid se postavlja odmah; callback-ovi ne blokiraju prozor.
+                await cancellationTokenSource.CancelAsync().ConfigureAwait(false);
+            }
+            catch (Exception exception)
+            {
+                System.Diagnostics.Trace.WriteLine(
+                    $"Greška pri prekidanju transfera: {exception}");
+            }
         }
 
         private Action<string> CreateLogAction(string groupName, string taskName)

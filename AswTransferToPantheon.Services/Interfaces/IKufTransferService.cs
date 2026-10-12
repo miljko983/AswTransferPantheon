@@ -2,7 +2,7 @@
 
 public interface IKufTransferService
 {
-    Task Transfer(int batchSize, CancellationToken token);
+    Task TransferForNalozi(List<long> nalogIds, int batchSize, CancellationToken token);
 
     Action<string>? LogAction { get; set; }
 

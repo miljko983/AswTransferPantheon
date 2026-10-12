@@ -18,6 +18,8 @@ public sealed class NaloziTransferService : INaloziTransferService
 
     public Action<string, string, string, string, Exception>? BadRecordAction { get; set; }
 
+    public Func<List<long>, CancellationToken, Task>? KufTransferAction { get; set; }
+
     public NaloziTransferService(IOptions<ConnectionStrings> connectionStrings)
     {
         this.connectionStrings = connectionStrings.Value;
@@ -25,10 +27,11 @@ public sealed class NaloziTransferService : INaloziTransferService
 
     public async Task Transfer(int batchSize, DateTime datumOd, CancellationToken token)
     {
-        if (token.IsCancellationRequested)
-        {
-            return;
-        }
+        token.ThrowIfCancellationRequested();
+        if (batchSize <= 0)
+            throw new ArgumentOutOfRangeException(nameof(batchSize));
+        var transferKuf = KufTransferAction ?? throw new InvalidOperationException(
+            "Nije podešen prenos KUF/VLPKUF uz naloge.");
 
         long lastId = 0;
         var ukupnoNalozi = 0;
@@ -51,7 +54,13 @@ public sealed class NaloziTransferService : INaloziTransferService
 
             var stavke = await ReadNaloziStavke(nalogIds, token);
 
-            await SaveNaloziPackageWithFallback(nalozi, stavke, token);
+            var savedNalogIds = await SaveNaloziPackageWithFallback(nalozi, stavke, token);
+
+            token.ThrowIfCancellationRequested();
+            if (savedNalogIds.Count > 0)
+            {
+                await transferKuf(savedNalogIds, token);
+            }
 
             ukupnoNalozi += nalozi.Count;
 
@@ -60,16 +69,17 @@ public sealed class NaloziTransferService : INaloziTransferService
             LogAction?.Invoke($"NALOZI paket {brojPaketa}: " + $"{nalozi.Count} naloga i " + $"{stavke.Count} stavki. " + $"Ukupno naloga: {ukupnoNalozi}.");
         }
 
-        LogAction?.Invoke($"NALOZI - završeno čitanje. " + $"Ukupno naloga: {ukupnoNalozi}.");
+        token.ThrowIfCancellationRequested();
+        LogAction?.Invoke($"NALOZI - završeno čitanje i obrada povezanih KUF/VLPKUF. " + $"Ukupno naloga: {ukupnoNalozi}.");
     }
 
     private async Task SaveNaloziPackage(List<Nalog> nalozi, List<NalogStavka> stavke, CancellationToken token)
     {
-        await using var connection =new SqlConnection(connectionStrings.Transfer);
+        await using var connection = new SqlConnection(connectionStrings.Transfer);
 
         await connection.OpenAsync(token);
 
-        await using var transaction =await connection.BeginTransactionAsync(token);
+        await using var transaction = await connection.BeginTransactionAsync(token);
 
         try
         {
@@ -99,11 +109,16 @@ public sealed class NaloziTransferService : INaloziTransferService
         }
     }
 
-    private async Task SaveNaloziPackageWithFallback(List<Nalog> nalozi, List<NalogStavka> stavke, CancellationToken token)
+    private async Task<List<long>> SaveNaloziPackageWithFallback(List<Nalog> nalozi, List<NalogStavka> stavke, CancellationToken token)
     {
         try
         {
             await SaveNaloziPackage(nalozi, stavke, token);
+            return nalozi.Select(nalog => nalog.Id).Distinct().ToList();
+        }
+        catch (OperationCanceledException) when (token.IsCancellationRequested)
+        {
+            throw;
         }
         catch (Exception batchException)
         {
@@ -116,20 +131,26 @@ public sealed class NaloziTransferService : INaloziTransferService
                 $"NALOZI paket od {nalozi.Count} naloga je neuspešan. " +
                 "Pokušavam naloge i stavke pojedinačno.");
 
+            var savedNalogIds = new List<long>();
+
             foreach (var nalog in nalozi)
             {
-                if (token.IsCancellationRequested)
-                {
-                    return;
-                }
+                token.ThrowIfCancellationRequested();
 
                 try
                 {
                     // Prvo pokušavamo samo zaglavlje naloga.
                     await SaveNaloziPackage([nalog], [], token);
+                    savedNalogIds.Add(nalog.Id);
+                }
+                catch (OperationCanceledException) when (token.IsCancellationRequested)
+                {
+                    throw;
                 }
                 catch (Exception nalogException)
                 {
+                    if (TransferErrorHelper.IsCriticalError(nalogException))
+                        throw;
                     BadRecordAction?.Invoke("NALOZI", $"ID={nalog.Id}", JsonSerializer.Serialize(nalog), "Greška pri upisu naloga.", nalogException);
 
                     continue;
@@ -139,18 +160,21 @@ public sealed class NaloziTransferService : INaloziTransferService
 
                 foreach (var stavka in nalogStavke)
                 {
-                    if (token.IsCancellationRequested)
-                    {
-                        return;
-                    }
+                    token.ThrowIfCancellationRequested();
 
                     try
                     {
                         // Svaku stavku pokušavamo pojedinačno.
                         await SaveNaloziPackage([], [stavka], token);
                     }
+                    catch (OperationCanceledException) when (token.IsCancellationRequested)
+                    {
+                        throw;
+                    }
                     catch (Exception stavkaException)
                     {
+                        if (TransferErrorHelper.IsCriticalError(stavkaException))
+                            throw;
                         BadRecordAction?.Invoke(
                             "NALOZISTAVKE",
                             $"ID={stavka.Id}; NALOG={stavka.Nalog}",
@@ -160,6 +184,8 @@ public sealed class NaloziTransferService : INaloziTransferService
                     }
                 }
             }
+
+            return savedNalogIds.Distinct().ToList();
         }
     }
 

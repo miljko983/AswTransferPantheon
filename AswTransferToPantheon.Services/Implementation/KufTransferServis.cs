@@ -21,58 +21,74 @@ public sealed class KufTransferService : IKufTransferService
         this.connectionStrings = connectionStrings.Value;
     }
 
-    public async Task Transfer(int batchSize, CancellationToken token)
+    public async Task TransferForNalozi(List<long> nalogIds, int batchSize, CancellationToken token)
     {
+        ArgumentNullException.ThrowIfNull(nalogIds);
         if (batchSize <= 0)
             throw new ArgumentOutOfRangeException(nameof(batchSize));
 
         token.ThrowIfCancellationRequested();
-        long lastId = 0;
+        if (nalogIds.Count == 0)
+            return;
+
         long totalRead = 0, totalInserted = 0, totalExisting = 0, totalRejected = 0;
         var batchNumber = 0;
-        LogAction?.Invoke("KUF - početak prenosa likvidiranih računa od 01.08.2026.");
+        var linkedKufIds = new HashSet<long>();
+        LogAction?.Invoke($"KUF - početak prenosa po stavkama {nalogIds.Distinct().Count()} naloga.");
 
-        while (true)
+        // Više naloga ili stavki može da upućuje na isti KUF. EXISTS ne umnožava redove.
+        foreach (var nalogChunk in nalogIds.Distinct().OrderBy(id => id).Chunk(500))
         {
-            token.ThrowIfCancellationRequested();
-            var batch = await ReadKufBatch(lastId, batchSize, token);
-            if (batch.ReadCount == 0)
-                break;
+            long lastId = 0;
+            while (true)
+            {
+                token.ThrowIfCancellationRequested();
+                var batch = await ReadKufBatch(lastId, batchSize, nalogChunk, token);
+                if (batch.ReadCount == 0)
+                    break;
 
-            lastId = batch.LastId;
-            batchNumber++;
-            totalRead += batch.ReadCount;
-            totalRejected += batch.RejectedCount;
+                lastId = batch.LastId;
+                batchNumber++;
+                totalRead += batch.ReadCount;
+                totalRejected += batch.RejectedCount;
 
-            var newRows = await FilterExistingKuf(batch.Rows, token);
-            totalExisting += batch.Rows.Count - newRows.Count;
+                var newRows = await FilterExistingKuf(batch.Rows, token);
+                totalExisting += batch.Rows.Count - newRows.Count;
 
-            var readyRows = await ReadAndApplyVlpLinks(newRows, token);
-            totalRejected += newRows.Count - readyRows.Count;
+                var readyRows = await ReadAndApplyVlpLinks(newRows, token);
+                totalRejected += newRows.Count - readyRows.Count;
 
-            var inserted = await InsertKufPackage(readyRows, token);
-            totalInserted += inserted;
-            totalExisting += readyRows.Count - inserted;
+                var inserted = await InsertKufPackage(readyRows, token);
+                totalInserted += inserted;
+                totalExisting += readyRows.Count - inserted;
 
-            LogAction?.Invoke(
-                $"KUF paket {batchNumber}: pročitano {batch.ReadCount}, " +
-                $"upisano {inserted}, neispravnih " +
-                $"{batch.RejectedCount + newRows.Count - readyRows.Count}.");
+                // Veze proveravamo i za već postojeće KUF račune iz ovih naloga.
+                // Novi odbijeni KUF ne sme dobiti veze pre nego što je upisan.
+                linkedKufIds.UnionWith(batch.Rows.Select(row => row.Id)
+                    .Except(newRows.Select(row => row.Id)));
+                linkedKufIds.UnionWith(readyRows.Select(row => row.Id));
+
+                LogAction?.Invoke(
+                    $"KUF paket {batchNumber}: pročitano {batch.ReadCount}, " +
+                    $"upisano {inserted}, neispravnih " +
+                    $"{batch.RejectedCount + newRows.Count - readyRows.Count}.");
+            }
         }
 
         LogAction?.Invoke(
             $"KUF završen. Pročitano {totalRead}, upisano {totalInserted}, " +
             $"već postojećih {totalExisting}, neispravnih {totalRejected}.");
 
-        // Radi i kada nije bilo novih KUF računa: veze mogu stići naknadno.
-        await TransferVlpKuf(batchSize, token);
+        // Veze mogu stići naknadno, ali obuhvat ostaje KUF iz obrađenih naloga.
+        await TransferVlpKuf(linkedKufIds.OrderBy(id => id).ToList(), batchSize, token);
         LogAction?.Invoke("KUF i VLPKUF - obrada je završena.");
     }
 
     private async Task<(List<Kuf> Rows, long LastId, int ReadCount, int RejectedCount)>
-        ReadKufBatch(long lastId, int batchSize, CancellationToken token)
+        ReadKufBatch(long lastId, int batchSize, long[] nalogIds, CancellationToken token)
     {
-        const string sql = """
+        var names = nalogIds.Select((_, i) => $":nalog{i}").ToArray();
+        var sql = $"""
             SELECT
                 ID,
                 FIRMA,
@@ -108,11 +124,17 @@ public sealed class KufTransferService : IKufTransferService
                 DATUMKNJIZENJA,
                 BROJOTPREMNICE,
                 UKUPANIZNOS
-            FROM IIS.KUF
-            WHERE ID > :lastId
-              AND LIKVIDIRAN = 'D'
-              AND DATUMRACUNA >= DATE '2026-08-01'
-            ORDER BY ID
+            FROM IIS.KUF k
+            WHERE k.ID > :lastId
+              AND EXISTS
+              (
+                  SELECT 1
+                  FROM IIS.NALOZI n
+                  JOIN IIS.NALOZISTAVKE ns ON ns.NALOG = n.ID
+                  WHERE n.ID IN ({string.Join(", ", names)})
+                    AND ns.DOKUMENTID = k.ID
+              )
+            ORDER BY k.ID
             FETCH NEXT :batchSize ROWS ONLY
             """;
 
@@ -128,6 +150,8 @@ public sealed class KufTransferService : IKufTransferService
         command.BindByName = true;
         command.Parameters.Add("lastId", OracleDbType.Int64).Value = lastId;
         command.Parameters.Add("batchSize", OracleDbType.Int32).Value = batchSize;
+        for (var i = 0; i < nalogIds.Length; i++)
+            command.Parameters.Add($"nalog{i}", OracleDbType.Int64).Value = nalogIds[i];
 
         await using var reader = await command.ExecuteReaderAsync(token);
         while (await reader.ReadAsync(token))
@@ -314,23 +338,18 @@ public sealed class KufTransferService : IKufTransferService
         }
     }
 
-    private async Task TransferVlpKuf(int batchSize, CancellationToken token)
+    private async Task TransferVlpKuf(List<long> linkedKufIds, int batchSize, CancellationToken token)
     {
-        // Oracle IN lista ostaje ispod ograničenja; čitaju se svi SQL KUF ID-evi.
+        // Oracle IN lista ostaje ispod ograničenja; samo KUF iz obrađenih naloga.
         var idBatchSize = Math.Min(batchSize, 500);
-        long? lastKufId = null;
         long totalKuf = 0, totalRead = 0, totalInserted = 0;
         long totalExisting = 0, totalRejected = 0;
 
-        LogAction?.Invoke("VLPKUF - početak prenosa veza za sve račune iz dbo.KUF.");
-        while (true)
+        LogAction?.Invoke("VLPKUF - početak prenosa veza za KUF račune iz obrađenih naloga.");
+        foreach (var chunk in linkedKufIds.Distinct().OrderBy(id => id).Chunk(idBatchSize))
         {
             token.ThrowIfCancellationRequested();
-            var kufIds = await ReadTransferredKufIds(lastKufId, idBatchSize, token);
-            if (kufIds.Count == 0)
-                break;
-
-            lastKufId = kufIds[^1];
+            var kufIds = chunk.ToList();
             totalKuf += kufIds.Count;
             var batch = await ReadVlpKufBatch(kufIds, token);
             totalRead += batch.ReadCount;
@@ -353,30 +372,6 @@ public sealed class KufTransferService : IKufTransferService
             $"VLPKUF završen. Provereno KUF računa {totalKuf}, " +
             $"pročitano veza {totalRead}, upisano {totalInserted}, " +
             $"već postojećih {totalExisting}, neispravnih {totalRejected}.");
-    }
-
-    private async Task<List<long>> ReadTransferredKufIds(
-        long? lastId, int batchSize, CancellationToken token)
-    {
-        var ids = new List<long>();
-        await using var connection = new SqlConnection(connectionStrings.Transfer);
-        await connection.OpenAsync(token);
-        using var command = connection.CreateCommand();
-        command.CommandTimeout = 120;
-        command.CommandText = """
-            SELECT TOP (@batchSize) ID
-            FROM dbo.KUF
-            WHERE @lastId IS NULL OR ID > @lastId
-            ORDER BY ID;
-            """;
-        command.Parameters.Add("@batchSize", SqlDbType.Int).Value = batchSize;
-        command.Parameters.Add("@lastId", SqlDbType.BigInt).Value = DbValue(lastId);
-
-        await using var reader = await command.ExecuteReaderAsync(token);
-        while (await reader.ReadAsync(token))
-            ids.Add(Convert.ToInt64(reader["ID"]));
-
-        return ids;
     }
 
     private async Task<(List<VlpKuf> Rows, int ReadCount, int RejectedCount)>
