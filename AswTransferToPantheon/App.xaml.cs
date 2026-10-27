@@ -48,6 +48,7 @@ namespace AswTransferToPantheon
                 services.AddTransient<ICentrosinergijaKreiranjeIdenataService, CentrosinergijaKreiranjeIdenataService>();
                 services.AddTransient<INaloziTransferService, NaloziTransferService>();
                 services.AddTransient<IKufTransferService, KufTransferService>();
+                services.AddTransient<IBoDocumentImportService, BoDocumentImportService>();
 
 
             })

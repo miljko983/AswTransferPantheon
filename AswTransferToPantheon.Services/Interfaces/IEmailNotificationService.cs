@@ -14,4 +14,5 @@ public interface IEmailNotificationService
     Task SendDocumentCreationErrorsSummaryEmail(string groupName, string taskName, List<BadRecordInfo> errors, CancellationToken token);
 
     Task SendCreatedIdentiCentrosinergijaSummaryEmail(string groupName, string taskName, List<CreatedIdentCentrosinergijaInfo> identi, CancellationToken token);
+    Task SendBoDocumentRunEmail(string groupName, string taskName, BoDocumentRunResult result, CancellationToken token);
 }

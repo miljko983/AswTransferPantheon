@@ -9,7 +9,7 @@ using Microsoft.Extensions.Options;
 
 namespace AswTransferToPantheon.Services.Implementation;
 
-public sealed class EmailNotificationService : IEmailNotificationService
+public sealed partial class EmailNotificationService : IEmailNotificationService
 {
     private readonly EmailConfiguration configuration;
     private readonly EmailRecipientCache emailRecipientCache;

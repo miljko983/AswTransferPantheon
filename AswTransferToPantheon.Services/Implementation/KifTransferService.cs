@@ -4,6 +4,7 @@ using AswTransferToPantheon.Services.Interfaces;
 using Microsoft.Extensions.Options;
 using Oracle.ManagedDataAccess.Client;
 using System.Data;
+using System.Globalization;
 using Microsoft.Data.SqlClient;
 
 namespace AswTransferToPantheon.Services.Implementation
@@ -70,7 +71,7 @@ namespace AswTransferToPantheon.Services.Implementation
                 LogAction?.Invoke(
                     $"KIF paket {batchNumber}: ubačeno {noviKifovi.Count} KIF, " +
                     $"{kifStavke.Count} stavki, {kifDatumValute.Count} datum valute, " +
-                    $"{kifKomentari.Count} komentara, {vlpZaglavlja.Count} VLP zaglavlja. " +
+                    $"{kifKomentari.Count} komentara, {seoResult.VlpInserted} VLP zaglavlja. " +
                     $"eOtpremnicaSEO: novih {seoResult.Inserted}, osveženih {seoResult.Updated}.");
 
                 var artikalIds = kifStavke
@@ -79,39 +80,242 @@ namespace AswTransferToPantheon.Services.Implementation
                     await AktivirajIdentePoKifStavkama(artikalIds, token);
             }
 
+            // Kandidati se čitaju tek kada su svi redovni KIF paketi potvrđeni.
+            // Dopuna se izvršava i kada u ovom prolazu nije bilo novih KIF-ova.
+            var totalVlpDopuna = await TransferMissingVlpZaglavlja(batchSize, token);
+
             LogAction?.Invoke(
                 $"KIF završen. Ukupno ubačeno: {totalKif} KIF, {totalStavke} stavki. " +
-                $"eOtpremnicaSEO: novih {totalSeoInserted}, osveženih {totalSeoUpdated}.");
+                $"eOtpremnicaSEO: novih {totalSeoInserted}, osveženih {totalSeoUpdated}. " +
+                $"VLP dopuna po VEZA: novih {totalVlpDopuna} zaglavlja.");
             LogAction?.Invoke(
                 $"KIF aktivacija identa završena. Ukupno aktivirano: {totalAktiviranihIdenata}.");
         }
 
 
 
-        private async Task BulkInsertVlpZaglavlja(SqlConnection connection, SqlTransaction transaction, List<VlpZaglavlje> vlpZaglavlja, CancellationToken token)
+        private async Task<long> TransferMissingVlpZaglavlja(int batchSize, CancellationToken token)
         {
+            token.ThrowIfCancellationRequested();
+            LogAction?.Invoke("VLP dopuna po VEZA - provera brojeva posle redovnog KIF prenosa...");
+
+            var references = await ReadVlpVezaBrojevi(token);
+            var brojevi = new HashSet<long>();
+            var invalidCount = 0;
+            foreach (var reference in references)
+            {
+                token.ThrowIfCancellationRequested();
+                if (TryParseVlpBroj(reference, out var broj))
+                    brojevi.Add(broj);
+                else
+                {
+                    invalidCount++;
+                    ReportVlpVezaProblem(reference ?? "<NULL>",
+                        "EKSTERNIBROJ nije ceo broj i ne može da se poveže sa Oracle poljem BROJ.");
+                }
+            }
+
+            LogAction?.Invoke($"VLP dopuna po VEZA: brojeva za proveru {brojevi.Count}, " +
+                $"neispravnih brojeva {invalidCount}.");
+            long totalInserted = 0;
+            long totalExisting = 0;
+            var notFound = 0;
+            var packageNumber = 0;
+            foreach (var batch in brojevi.OrderBy(x => x).Chunk(Math.Min(batchSize, 500)))
+            {
+                token.ThrowIfCancellationRequested();
+                packageNumber++;
+                // Vraćaju se SVA Oracle zaglavlja za tražene brojeve, bez datumske granice.
+                var headers = await ReadVlpZaglavljaBatch(batch.ToList(), byBroj: true, token);
+                var foundBrojevi = headers.Where(x => x.Broj.HasValue)
+                    .Select(x => x.Broj!.Value).ToHashSet();
+                foreach (var broj in batch.Where(x => !foundBrojevi.Contains(x)))
+                {
+                    notFound++;
+                    ReportVlpVezaProblem(broj.ToString(CultureInfo.InvariantCulture),
+                        "U Oracle IIS.VLPZAGLAVLJA nije pronađeno zaglavlje sa ovim BROJ.");
+                }
+
+                token.ThrowIfCancellationRequested();
+                // Sva zaglavlja ovih brojeva potvrđuju se zajedno. Delimičan upis za
+                // isti BROJ sakrio bi preostale parove iz sledeće provere po BROJ-u.
+                var inserted = headers.Count == 0
+                    ? 0
+                    : await InsertVlpZaglavljaPackage(headers, token);
+                totalInserted += inserted;
+                totalExisting += headers.Count - inserted;
+                LogAction?.Invoke($"VLP dopuna po VEZA paket {packageNumber}: " +
+                    $"Oracle zaglavlja {headers.Count}, novih parova ID/KIF {inserted}, " +
+                    $"postojećih parova {headers.Count - inserted}.");
+            }
+
+            LogAction?.Invoke($"VLP dopuna po VEZA završena: novih zaglavlja {totalInserted}, " +
+                $"postojećih parova {totalExisting}, brojeva bez Oracle zaglavlja {notFound}, " +
+                $"neispravnih brojeva {invalidCount}.");
+            return totalInserted;
+        }
+
+        private async Task<List<string?>> ReadVlpVezaBrojevi(CancellationToken token)
+        {
+            await using var connection = new SqlConnection(connectionStrings.Transfer);
+            await connection.OpenAsync(token);
+            using var command = connection.CreateCommand();
+            command.CommandTimeout = 120;
+            // Datum važi samo za izbor KIF-ova u Transfer bazi.
+            // NOT EXISTS ne gubi sve kandidate ako neki postojeći BROJ ima NULL.
+            // TRY_CONVERT omogućava prijavu neispravnog EKSTERNIBROJ umesto prekida upita.
+            command.CommandText = """
+                SELECT DISTINCT x.EKSTERNIBROJ
+                FROM dbo.KIF AS k
+                INNER JOIN dbo.VLPZAGLAVLJA AS v
+                    ON v.KIF = k.ID
+                CROSS APPLY
+                (
+                    VALUES
+                    (
+                        REPLACE(
+                            REPLACE(LTRIM(RTRIM(v.EKSTERNIBROJ)), '.', ''),
+                            ',', ''
+                        )
+                    )
+                ) AS x(EKSTERNIBROJ)
+                WHERE k.DATUMRACUNA > CONVERT(datetime, '20260731', 112)
+                  AND EXISTS
+                  (
+                      SELECT 1
+                      FROM centrosinergija.dbo._tb_MapiranjeKIF_VLP_KUF AS m
+                      WHERE m.acOrgJed = v.ORGJED
+                        AND m.acDokument = v.DOKUMENT
+                        AND m.acAcctKupac = 'VEZA'
+                  )
+                  AND NOT EXISTS
+                  (
+                      SELECT 1
+                      FROM dbo.VLPZAGLAVLJA AS existing
+                      WHERE existing.BROJ = TRY_CONVERT(
+                          decimal(38, 10),
+                          NULLIF(x.EKSTERNIBROJ, '')
+                      )
+                  );
+                """;
+            var result = new List<string?>();
+            await using var reader = await command.ExecuteReaderAsync(token);
+            while (await reader.ReadAsync(token))
+                result.Add(reader.IsDBNull(0) ? null : reader.GetString(0));
+            return result;
+        }
+
+        private static bool TryParseVlpBroj(string? value, out long broj)
+        {
+            broj = 0;
+            if (!decimal.TryParse(value?.Trim(),
+                    NumberStyles.AllowLeadingSign | NumberStyles.AllowDecimalPoint,
+                    CultureInfo.InvariantCulture, out var number)
+                || number != decimal.Truncate(number)
+                || number < long.MinValue || number > long.MaxValue)
+                return false;
+            broj = (long)number;
+            return true;
+        }
+
+        private void ReportVlpVezaProblem(string eksterniBroj, string message)
+        {
+            var key = $"EKSTERNIBROJ={eksterniBroj}";
+            LogAction?.Invoke($"VLP dopuna po VEZA: {key}. {message}");
+            BadRecordAction?.Invoke("VLPZAGLAVLJA", key, eksterniBroj, message,
+                new InvalidOperationException(message));
+        }
+
+        private async Task<int> InsertVlpZaglavljaPackage(
+            List<VlpZaglavlje> headers, CancellationToken token)
+        {
+            await using var connection = new SqlConnection(connectionStrings.Transfer);
+            await connection.OpenAsync(token);
+            await using var transaction =
+                (SqlTransaction)await connection.BeginTransactionAsync(token);
+            try
+            {
+                var inserted = await BulkInsertVlpZaglavlja(connection, transaction, headers, token);
+                await transaction.CommitAsync(token);
+                return inserted;
+            }
+            catch
+            {
+                await transaction.RollbackAsync(CancellationToken.None);
+                throw;
+            }
+        }
+
+        private async Task<int> BulkInsertVlpZaglavlja(SqlConnection connection, SqlTransaction transaction, List<VlpZaglavlje> vlpZaglavlja, CancellationToken token)
+        {
+            token.ThrowIfCancellationRequested();
             if (vlpZaglavlja.Count == 0)
             {
-                return;
+                return 0;
             }
 
-            var table = CreateVlpZaglavljaDataTable(vlpZaglavlja);
+            var duplicate = vlpZaglavlja.GroupBy(x => (x.Id, x.Kif))
+                .FirstOrDefault(group => group.Count() > 1);
+            if (duplicate != null)
+                throw new InvalidOperationException(
+                    $"Oracle VLPZAGLAVLJA sadrži dupli par ID={duplicate.Key.Id}, " +
+                    $"KIF={duplicate.Key.Kif?.ToString() ?? "<NULL>"} u istom paketu.");
 
-            using var bulkCopy = new SqlBulkCopy(
-                connection,
-                SqlBulkCopyOptions.CheckConstraints,
-                transaction);
+            using var table = CreateVlpZaglavljaDataTable(vlpZaglavlja);
+            // Kolone su iz postojeće, fiksne mape celog zaglavlja.
+            var columns = string.Join(", ", table.Columns.Cast<DataColumn>()
+                .Select(column => $"[{column.ColumnName}]"));
+            var sourceColumns = string.Join(", ", table.Columns.Cast<DataColumn>()
+                .Select(column => $"s.[{column.ColumnName}]"));
 
-            bulkCopy.DestinationTableName = "dbo.VLPZAGLAVLJA";
-            bulkCopy.BatchSize = vlpZaglavlja.Count;
-            bulkCopy.BulkCopyTimeout = 60;
-
-            foreach (DataColumn column in table.Columns)
+            using (var createCommand = connection.CreateCommand())
             {
-                bulkCopy.ColumnMappings.Add(column.ColumnName, column.ColumnName);
+                createCommand.Transaction = transaction;
+                createCommand.CommandTimeout = 60;
+                createCommand.CommandText = $"""
+                    SELECT TOP (0) {columns}
+                    INTO #VlpZaglavljaInsert
+                    FROM dbo.VLPZAGLAVLJA;
+
+                    CREATE UNIQUE CLUSTERED INDEX IX_VlpZaglavljaInsert_ID_KIF
+                        ON #VlpZaglavljaInsert (ID, KIF);
+                    """;
+                await createCommand.ExecuteNonQueryAsync(token);
             }
 
-            await bulkCopy.WriteToServerAsync(table);
+            using (var bulkCopy = new SqlBulkCopy(
+                connection,
+                SqlBulkCopyOptions.CheckConstraints | SqlBulkCopyOptions.KeepNulls,
+                transaction))
+            {
+                bulkCopy.DestinationTableName = "#VlpZaglavljaInsert";
+                bulkCopy.BatchSize = Math.Min(vlpZaglavlja.Count, 1000);
+                bulkCopy.BulkCopyTimeout = 60;
+                foreach (DataColumn column in table.Columns)
+                    bulkCopy.ColumnMappings.Add(column.ColumnName, column.ColumnName);
+                await bulkCopy.WriteToServerAsync(table, token);
+            }
+
+            using var command = connection.CreateCommand();
+            command.Transaction = transaction;
+            command.CommandTimeout = 120;
+            command.CommandText = $"""
+                INSERT INTO dbo.VLPZAGLAVLJA ({columns})
+                SELECT {sourceColumns}
+                FROM #VlpZaglavljaInsert AS s
+                WHERE NOT EXISTS
+                (
+                    SELECT 1
+                    FROM dbo.VLPZAGLAVLJA AS t WITH (UPDLOCK, HOLDLOCK)
+                    WHERE t.ID = s.ID
+                      AND (t.KIF = s.KIF OR (t.KIF IS NULL AND s.KIF IS NULL))
+                );
+
+                DECLARE @Inserted int = @@ROWCOUNT;
+                DROP TABLE #VlpZaglavljaInsert;
+                SELECT @Inserted;
+                """;
+            return Convert.ToInt32(await command.ExecuteScalarAsync(token));
         }
 
         private DataTable CreateVlpZaglavljaDataTable(List<VlpZaglavlje> vlpZaglavlja)
@@ -233,14 +437,29 @@ namespace AswTransferToPantheon.Services.Implementation
 
         private async Task<List<VlpZaglavlje>> ReadVlpZaglavlja(List<long> kifIds, CancellationToken token)
         {
-            if (kifIds.Count == 0)
+            var result = new List<VlpZaglavlje>();
+            foreach (var batch in kifIds.Distinct().Chunk(500))
+            {
+                token.ThrowIfCancellationRequested();
+                result.AddRange(await ReadVlpZaglavljaBatch(batch.ToList(), byBroj: false, token));
+            }
+            return result;
+        }
+
+        private async Task<List<VlpZaglavlje>> ReadVlpZaglavljaBatch(
+            List<long> values, bool byBroj, CancellationToken token)
+        {
+            if (values.Count == 0)
             {
                 return [];
             }
 
-            var parameterNames = kifIds
-                .Select((_, index) => $":kif{index}")
+            var parameterNames = values
+                .Select((_, index) => $":value{index}")
                 .ToList();
+            // Isti skup kolona za redovni prenos po KIF-u i dopunu po BROJ-u.
+            // Oracle dopuna nema uslov po datumu, godini ili statusu.
+            var column = byBroj ? "BROJ" : "KIF";
 
             var sql = $"""
                         SELECT
@@ -297,7 +516,7 @@ namespace AswTransferToPantheon.Services.Implementation
                             VLPRAZLOGPOVRATA,
                             INCOTERMSKLAUZULA
                         FROM IIS.VLPZAGLAVLJA
-                        WHERE KIF IN ({string.Join(", ", parameterNames)})
+                        WHERE {column} IN ({string.Join(", ", parameterNames)})
                         ORDER BY KIF, ID
                         """;
 
@@ -309,10 +528,11 @@ namespace AswTransferToPantheon.Services.Implementation
             await using var command = connection.CreateCommand();
             command.CommandText = sql;
             command.BindByName = true;
+            command.CommandTimeout = 120;
 
-            for (var i = 0; i < kifIds.Count; i++)
+            for (var i = 0; i < values.Count; i++)
             {
-                command.Parameters.Add($"kif{i}", OracleDbType.Int64).Value = kifIds[i];
+                command.Parameters.Add($"value{i}", OracleDbType.Int64).Value = values[i];
             }
 
             await using var reader = await command.ExecuteReaderAsync(token);
@@ -642,7 +862,7 @@ namespace AswTransferToPantheon.Services.Implementation
                 .ToList();
         }
 
-        private async Task<(int Inserted, int Updated)> InsertKifPackage(
+        private async Task<(int Inserted, int Updated, int VlpInserted)> InsertKifPackage(
             List<Kif> kifovi, List<KifStavka> kifStavke,
             List<KifDatumValute> kifDatumValute, List<KifKomentar> kifKomentari,
             List<VlpZaglavlje> vlpZaglavlja, List<EOtpremnicaSeo> eOtpremniceSeo,
@@ -658,11 +878,11 @@ namespace AswTransferToPantheon.Services.Implementation
                 await BulkInsertKifStavke(connection, transaction, kifStavke, token);
                 await BulkInsertKifDatumValute(connection, transaction, kifDatumValute, token);
                 await BulkInsertKifKomentari(connection, transaction, kifKomentari, token);
-                await BulkInsertVlpZaglavlja(connection, transaction, vlpZaglavlja, token);
+                var vlpInserted = await BulkInsertVlpZaglavlja(connection, transaction, vlpZaglavlja, token);
                 var result = await BulkInsertEOtpremnicaSeo(
                     connection, transaction, eOtpremniceSeo, token);
                 await transaction.CommitAsync(token);
-                return result;
+                return (result.Inserted, result.Updated, vlpInserted);
             }
             catch
             {

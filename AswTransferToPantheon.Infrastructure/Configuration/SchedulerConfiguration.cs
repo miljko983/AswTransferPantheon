@@ -7,4 +7,6 @@ public sealed class SchedulerConfiguration
     public List<PeriodicTask> PeriodicTasks { get; set; } = [];
 
     public List<NaloziTaskConfiguration> NaloziTasks { get; set; } = [];
+    public List<BoDocumentTaskConfiguration> BODocumentTasks { get; set; } = [];
+
 }

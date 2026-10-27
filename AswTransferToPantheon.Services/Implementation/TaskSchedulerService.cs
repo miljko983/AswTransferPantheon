@@ -8,7 +8,7 @@ using AswTransferToPantheon.Services.Helpers;
 
 namespace AswTransferToPantheon.Services.Implementation
 {
-    public class TaskSchedulerService : ITaskSchedulerService
+    public partial class TaskSchedulerService : ITaskSchedulerService
     {
         private const string ExecutionTimesPath = "executiontimes.json";
         private const string FailedTaskNameKey = "TransferTaskName";
@@ -25,11 +25,13 @@ namespace AswTransferToPantheon.Services.Implementation
         private readonly IDocumentCreationService_CL_WMS documentCreationService_CL_WMS;
         private readonly ICentrosinergijaKreiranjeIdenataService centrosinergijaKreiranjeIdenataService;
         private readonly INaloziTransferService naloziTransferService;
+        private readonly IBoDocumentImportService boDocumentImportService;
         public Action<string> LogAction { get; set; }
 
         public Action<Exception, string> LogErrorAction { get; set; }
 
-        public TaskSchedulerService(IOptions<SchedulerConfiguration> schedulerConfiguration,
+        public TaskSchedulerService(
+                                    IOptions<SchedulerConfiguration> schedulerConfiguration,
                                     IKifTransferService kifTransferService,
                                     IKufTransferService kufTransferService,
                                     IArtikliTransferService artikliTransferService,
@@ -38,7 +40,8 @@ namespace AswTransferToPantheon.Services.Implementation
                                     ITransferFileLogger transferFileLogger,
                                     IEmailNotificationService emailNotificationService,
                                     IDocumentCreationService_CL_WMS documentCreationService_CL_WMS,
-                                    ICentrosinergijaKreiranjeIdenataService centrosinergijaKreiranjeIdenataService)
+                                    ICentrosinergijaKreiranjeIdenataService centrosinergijaKreiranjeIdenataService,
+                                    IBoDocumentImportService boDocumentImportService)
         {
             this.schedulerConfiguration = schedulerConfiguration;
             this.kifTransferService = kifTransferService;
@@ -49,16 +52,23 @@ namespace AswTransferToPantheon.Services.Implementation
             this.transferFileLogger = transferFileLogger;
             this.emailNotificationService = emailNotificationService;
             this.documentCreationService_CL_WMS = documentCreationService_CL_WMS;
-            this.centrosinergijaKreiranjeIdenataService = centrosinergijaKreiranjeIdenataService;
+            this.centrosinergijaKreiranjeIdenataService =
+                centrosinergijaKreiranjeIdenataService;
+            this.boDocumentImportService = boDocumentImportService;
         }
 
         public Task ScheduleTasks()
         {
             var configuration = schedulerConfiguration.Value;
+
             // Transferi i njihovi nastavci ne treba da zauzimaju nit prozora.
             _ = Task.Run(() => ScheduleDailyTasks(configuration.DailyTasks));
             _ = Task.Run(() => SchedulePeriodicTasks(configuration.PeriodicTasks));
             _ = Task.Run(() => ScheduleNaloziTasks(configuration.NaloziTasks));
+
+            _ = Task.Run(() =>
+                ScheduleBoDocumentTasks(configuration.BODocumentTasks ?? []));
+
             return Task.CompletedTask;
         }
 
