@@ -140,7 +140,7 @@ public partial class TaskSchedulerService
 
                     // Pamti se vreme pokušaja i kada obrada prijavi grešku.
                     lastAttemptAt = now;
-                    executionDate = now.Date;
+                    executionDate = now.Date.AddDays(-1);//now.Date;
 
                     await ExecuteBoDocuments(
                         configuration,

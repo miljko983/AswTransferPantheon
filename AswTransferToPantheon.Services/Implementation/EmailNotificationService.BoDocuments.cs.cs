@@ -45,11 +45,7 @@ public sealed partial class EmailNotificationService
                 HtmlEncoder.Default.Encode(result.Status))
             .Replace("{{Content}}", content);
 
-        return SendEmail(
-            notification.Subject,
-            body,
-            "BODokumenti",
-            token);
+        return SendEmail(notification.Subject, body, key, token);
     }
 
     private static string BuildBoDocumentContent(
