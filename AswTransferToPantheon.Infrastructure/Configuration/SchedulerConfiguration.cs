@@ -8,5 +8,6 @@ public sealed class SchedulerConfiguration
 
     public List<NaloziTaskConfiguration> NaloziTasks { get; set; } = [];
     public List<BoDocumentTaskConfiguration> BODocumentTasks { get; set; } = [];
+    public KifDocumentProcessingConfiguration KIFDocumentProcessing { get; set; } = new();
 
 }

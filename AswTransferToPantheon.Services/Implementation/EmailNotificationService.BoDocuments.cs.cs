@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Linq;
 using System.Text;
 using System.Text.Encodings.Web;
 using System.Threading;
@@ -9,43 +10,139 @@ namespace AswTransferToPantheon.Services.Implementation;
 
 public sealed partial class EmailNotificationService
 {
-    public Task SendBoDocumentRunEmail(
+    private readonly SemaphoreSlim boMailGate = new(1, 1);
+
+    private readonly System.Collections.Generic.Dictionary<
+        (string Group, string Task, DateTime Date),
+        BoMailSnapshot?> boMailHistory = new();
+
+    private sealed record BoMailSnapshot(
+        string Nalog,
+        int Selected,
+        int Posted,
+        decimal? Debit,
+        decimal? Credit,
+        decimal? Difference);
+
+    public async Task SendBoDocumentRunEmail(
         string groupName,
         string taskName,
         BoDocumentRunResult result,
         CancellationToken token)
     {
-        var key = result.HasErrors
-            ? "BODokumenti.Errors"
-            : "BODokumenti.Completed";
+        await boMailGate.WaitAsync(token);
 
-        if (!TryGetNotification(key, out var notification))
-            return Task.CompletedTask;
+        try
+        {
+            var historyKey = (groupName, taskName, result.Datum.Date);
+            var snapshot = GetBoMailSnapshot(result);
 
-        var content = BuildBoDocumentContent(
-            groupName,
-            taskName,
-            result);
+            if (!result.SamoProvera)
+            {
+                var noNewDocuments = !result.HasErrors
+                    && result.Documents.Count == 0
+                    && result.Summary is
+                    {
+                        IzabranoDokumenata: 0,
+                        KreiranoDokumenata: 0,
+                        KreiranoStavki: 0,
+                        BrojGresaka: 0,
+                        PreostaloDokumenataZaDatum: 0,
+                        GreskeKnjizenja: 0
+                    };
 
-        var template = string.IsNullOrWhiteSpace(notification.BodyTemplate)
-            ? "<html><body>{{Content}}</body></html>"
-            : notification.BodyTemplate;
+                if (noNewDocuments && snapshot is not null)
+                {
+                    var hadPrevious = boMailHistory.TryGetValue(
+                        historyKey, out var previous);
 
-        var body = template
-            .Replace(
-                "{{Date}}",
-                HtmlEncoder.Default.Encode(
-                    result.Datum.ToString("dd.MM.yyyy")))
-            .Replace(
-                "{{ImportId}}",
-                HtmlEncoder.Default.Encode(
-                    result.ImportId?.ToString() ?? "-"))
-            .Replace(
-                "{{Status}}",
-                HtmlEncoder.Default.Encode(result.Status))
-            .Replace("{{Content}}", content);
+                    // Isti uspešan rezultat je već poslat.
+                    if (hadPrevious && previous == snapshot)
+                        return;
 
-        return SendEmail(notification.Subject, body, key, token);
+                    // Potpuno prazan datum, bez prethodnog problema.
+                    if (!hadPrevious
+                        && snapshot.Selected == 0
+                        && snapshot.Posted == 0
+                        && snapshot.Nalog.Length == 0)
+                    {
+                        return;
+                    }
+                }
+
+                // Greška ili novi rezultat zahtevaju novo obaveštenje.
+                // null ostaje i kada slanje bude preskočeno ili ne uspe.
+                boMailHistory[historyKey] = null;
+            }
+
+            var key = result.HasErrors
+                ? "BODokumenti.Errors"
+                : "BODokumenti.Completed";
+
+            if (!TryGetNotification(key, out var notification))
+                return;
+
+            var content = BuildBoDocumentContent(
+                groupName, taskName, result);
+
+            var template = string.IsNullOrWhiteSpace(notification.BodyTemplate)
+                ? "<html><body>{{Content}}</body></html>"
+                : notification.BodyTemplate;
+
+            var body = template
+                .Replace("{{Date}}",
+                    HtmlEncoder.Default.Encode(result.Datum.ToString("dd.MM.yyyy")))
+                .Replace("{{ImportId}}",
+                    HtmlEncoder.Default.Encode(result.ImportId?.ToString() ?? "-"))
+                .Replace("{{Status}}",
+                    HtmlEncoder.Default.Encode(result.Status))
+                .Replace("{{Content}}", content);
+
+            var sent = await SendEmail(
+                notification.Subject, body, key, token);
+
+            if (sent && !result.SamoProvera && snapshot is not null)
+                boMailHistory[historyKey] = snapshot;
+        }
+        finally
+        {
+            boMailGate.Release();
+        }
+    }
+
+    private static BoMailSnapshot? GetBoMailSnapshot(
+        BoDocumentRunResult result)
+    {
+        if (result.HasErrors
+            || result.SamoProvera
+            || result.Status != "Completed"
+            || result.Summary is not
+            {
+                IzabranoZaKnjizenje: int selected,
+                KnjizenoDokumenata: int posted
+            } summary
+            || selected < 0
+            || posted != selected)
+        {
+            return null;
+        }
+
+        var nalog = summary.Nalog?.Trim() ?? "";
+
+        if ((posted > 0 && nalog.Length == 0)
+            || (nalog.Length > 0
+                && (!summary.DugujeNaloga.HasValue
+                    || !summary.PotrazujeNaloga.HasValue
+                    || !summary.RazlikaZaIzravnanje.HasValue)))
+        {
+            return null;
+        }
+
+        return new BoMailSnapshot(
+            nalog, selected, posted,
+            summary.DugujeNaloga,
+            summary.PotrazujeNaloga,
+            summary.RazlikaZaIzravnanje);
     }
 
     private static string BuildBoDocumentContent(
@@ -171,36 +268,61 @@ public sealed partial class EmailNotificationService
         {
             builder.AppendLine(
                 result.SamoProvera
-                    ? "<h4>Dokumenti koji su prošli proveru</h4>"
-                    : "<h4>Kreirani dokumenti u ovom uvozu</h4>");
+                    ? "<h4>Zbirni pregled dokumenata koji su prošli proveru</h4>"
+                    : "<h4>Kreirani dokumenti — pregled od–do</h4>");
 
             builder.AppendLine(
                 "<table border='1' cellpadding='5' cellspacing='0'>" +
                 "<tr>" +
-                "<th>Dokument</th>" +
-                "<th>Datum</th>" +
-                "<th>Vrsta</th>" +
-                "<th>Robni dokument</th>" +
+                "<th>Vrsta dokumenta</th>" +
+                "<th>Robni dokument od</th>" +
+                "<th>Robni dokument do</th>" +
+                "<th>Broj dokumenata</th>" +
                 "<th>Vrsta naloga</th>" +
                 "<th>Nalog</th>" +
-                "<th>Stavki</th>" +
                 "</tr>");
 
-            foreach (var document in result.Documents)
+            var groups = result.Documents
+                .GroupBy(document => new
+                {
+                    VrstaDokumenta = document.VrstaDokumenta?.Trim() ?? "",
+                    VrstaNaloga = document.VrstaNaloga?.Trim() ?? "",
+                    Nalog = document.Nalog?.Trim() ?? ""
+                })
+                .OrderBy(group => group.Key.VrstaDokumenta, StringComparer.Ordinal)
+                .ThenBy(group => group.Key.VrstaNaloga, StringComparer.Ordinal)
+                .ThenBy(group => group.Key.Nalog, StringComparer.Ordinal);
+
+            foreach (var group in groups)
             {
+                var keys = group
+                    .Select(document => document.RobniDokument?.Trim())
+                    .Where(key => !string.IsNullOrWhiteSpace(key))
+                    .Select(key => key!)
+                    .Distinct(StringComparer.Ordinal)
+                    .OrderBy(key => key, StringComparer.Ordinal)
+                    .ToArray();
+
                 builder.AppendLine(
                     "<tr>" +
-                    $"<td>{H(document.Dokument)}</td>" +
-                    $"<td>{H(document.Datum?.ToString("dd.MM.yyyy"))}</td>" +
-                    $"<td>{H(document.VrstaDokumenta)}</td>" +
-                    $"<td>{H(document.RobniDokument)}</td>" +
-                    $"<td>{H(document.VrstaNaloga)}</td>" +
-                    $"<td>{H(document.Nalog)}</td>" +
-                    $"<td>{H(document.BrojStavki)}</td>" +
+                    $"<td>{H(group.Key.VrstaDokumenta)}</td>" +
+                    $"<td>{H(keys.FirstOrDefault())}</td>" +
+                    $"<td>{H(keys.LastOrDefault())}</td>" +
+                    $"<td>{H(group.Count())}</td>" +
+                    $"<td>{H(group.Key.VrstaNaloga)}</td>" +
+                    $"<td>{H(group.Key.Nalog)}</td>" +
                     "</tr>");
             }
 
             builder.AppendLine("</table>");
+
+            if (!result.SamoProvera)
+            {
+                builder.AppendLine(
+                    "<p>Od–do prikazuje prvi i poslednji robni dokument u grupi. " +
+                    "Između njih mogu postojati praznine; broj dokumenata " +
+                    "odnosi se na dokumente iz ovog uvoza.</p>");
+            }
         }
 
         if (result.Errors.Count > 0)

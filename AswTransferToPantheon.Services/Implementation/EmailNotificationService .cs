@@ -13,10 +13,19 @@ public sealed partial class EmailNotificationService : IEmailNotificationService
 {
     private readonly EmailConfiguration configuration;
     private readonly EmailRecipientCache emailRecipientCache;
-    public EmailNotificationService(IOptions<EmailConfiguration> configuration, EmailRecipientCache emailRecipientCache)
+    private readonly EmailErrorHistoryService emailErrorHistory;
+    private readonly ITransferFileLogger emailHistoryLogger;
+
+    public EmailNotificationService(
+        IOptions<EmailConfiguration> configuration,
+        EmailRecipientCache emailRecipientCache,
+        EmailErrorHistoryService emailErrorHistory,
+        ITransferFileLogger emailHistoryLogger)
     {
         this.configuration = configuration.Value;
         this.emailRecipientCache = emailRecipientCache;
+        this.emailErrorHistory = emailErrorHistory;
+        this.emailHistoryLogger = emailHistoryLogger;
     }
 
     public Task SendTestEmail(CancellationToken token)
@@ -58,6 +67,12 @@ public sealed partial class EmailNotificationService : IEmailNotificationService
 
         var subject = notification.Subject;
 
+        if (string.Equals(notificationKey, KifBadRecordsNotification, StringComparison.OrdinalIgnoreCase))
+        {
+            return SendKifBadRecordsWithHistoryAsync(
+                groupName, taskName, subject, badRecords, token);
+        }
+
         var body = BuildBadRecordsSummaryBody(groupName, taskName, badRecords);
 
         return SendEmail(subject, body, taskName, token);
@@ -83,11 +98,11 @@ public sealed partial class EmailNotificationService : IEmailNotificationService
         return SendEmail(notification.Subject, body, "Task", token);
     }
 
-    private async Task SendEmail(string subject, string body, string oblast, CancellationToken token)
+    private async Task<bool> SendEmail(string subject, string body, string oblast, CancellationToken token)
     {
         if (!configuration.Enabled)
         {
-            return;
+            return false;
         }
 
         var recipients = emailRecipientCache.GetRecipients(oblast);
@@ -95,7 +110,7 @@ public sealed partial class EmailNotificationService : IEmailNotificationService
         if (recipients is null ||
             recipients.To.Count == 0)
         {
-            return;
+            return false;
         }
 
         using var mailMessage = new MailMessage
@@ -129,6 +144,8 @@ public sealed partial class EmailNotificationService : IEmailNotificationService
         await smtpClient.SendMailAsync(
             mailMessage,
             token);
+
+        return true;
     }
 
     private string BuildBadRecordsSummaryBody(string groupName, string taskName, List<BadRecordInfo> badRecords)

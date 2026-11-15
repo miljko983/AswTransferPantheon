@@ -41,7 +41,8 @@ namespace AswTransferToPantheon.Services.Implementation
                                     IEmailNotificationService emailNotificationService,
                                     IDocumentCreationService_CL_WMS documentCreationService_CL_WMS,
                                     ICentrosinergijaKreiranjeIdenataService centrosinergijaKreiranjeIdenataService,
-                                    IBoDocumentImportService boDocumentImportService)
+                                    IBoDocumentImportService boDocumentImportService,
+                                    IKifDocumentProcessingService kifDocumentProcessingService)
         {
             this.schedulerConfiguration = schedulerConfiguration;
             this.kifTransferService = kifTransferService;
@@ -55,6 +56,7 @@ namespace AswTransferToPantheon.Services.Implementation
             this.centrosinergijaKreiranjeIdenataService =
                 centrosinergijaKreiranjeIdenataService;
             this.boDocumentImportService = boDocumentImportService;
+            this.kifDocumentProcessingService = kifDocumentProcessingService;
         }
 
         public Task ScheduleTasks()
@@ -555,76 +557,10 @@ namespace AswTransferToPantheon.Services.Implementation
             }
         }
 
-        private async Task TransferKif(int batchSize, string groupName, string taskName)
+        private Task TransferKif(int batchSize, string groupName, string taskName)
         {
-            var badRecords = new List<BadRecordInfo>();
-
-            kifTransferService.LogAction = CreateLogAction(groupName, taskName);
-
-            kifTransferService.BadRecordAction =
-                (table, key, data, message, exception) =>
-                {
-                    transferFileLogger.BadRecord(
-                        groupName,
-                        taskName,
-                        table,
-                        key,
-                        data,
-                        exception);
-
-                    badRecords.Add(
-                        new BadRecordInfo
-                        {
-                            TableName = table,
-                            Key = key,
-                            Data = data,
-                            Message = message,
-                            Exception = exception.Message
-                        });
-                };
-
-            try
-            {
-                transferFileLogger.Info(
-                    groupName,
-                    taskName,
-                    $"START {taskName}. " +
-                    $"BatchSize: {batchSize}");
-
-                await kifTransferService.Transfer(batchSize, cancellationTokenSource.Token);
-
-                if (badRecords.Count > 0)
-                {
-                    await emailNotificationService
-                        .SendBadRecordsSummaryEmail(
-                            groupName,
-                            taskName,
-                            badRecords,
-                            cancellationTokenSource.Token);
-                }
-
-                transferFileLogger.Info(groupName, taskName, "KIF prenos je završen.");
-
-                transferFileLogger.Info(groupName, taskName, $"END {taskName}.");
-            }
-            catch (Exception exception)
-            {
-                if (TransferErrorHelper.IsCriticalError(exception))
-                {
-                    var message =
-                        $"Kritična greška u tasku {taskName}. " +
-                        "Trenutno izvršavanje se prekida " +
-                        "do sledećeg termina.";
-
-                    await LogCritical(groupName, taskName, message, exception);
-
-                    throw new CriticalTransferException(message, exception);
-                }
-
-                throw;
-            }
+            return TransferKifWithDocumentsAsync(batchSize, groupName, taskName);
         }
-
         private async Task ExecuteKreiranjeIdenataCentrosinergija(string groupName)
         {
             const string taskName = "KreiranjeIdenata";
@@ -1019,3 +955,4 @@ namespace AswTransferToPantheon.Services.Implementation
 
     }
 }
+

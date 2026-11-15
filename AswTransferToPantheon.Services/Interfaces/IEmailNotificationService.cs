@@ -15,4 +15,8 @@ public interface IEmailNotificationService
 
     Task SendCreatedIdentiCentrosinergijaSummaryEmail(string groupName, string taskName, List<CreatedIdentCentrosinergijaInfo> identi, CancellationToken token);
     Task SendBoDocumentRunEmail(string groupName, string taskName, BoDocumentRunResult result, CancellationToken token);
+
+    Task SendKifDocumentSuccessEmail(string groupName, string taskName, KifDocumentRunResult result, CancellationToken token);
+
+    Task SendKifDocumentErrorsEmail(string groupName, string taskName, KifDocumentRunResult result, CancellationToken token);
 }
