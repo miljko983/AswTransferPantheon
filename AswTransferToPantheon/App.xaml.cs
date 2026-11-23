@@ -51,6 +51,7 @@ namespace AswTransferToPantheon
                 services.AddTransient<INaloziTransferService, NaloziTransferService>();
                 services.AddTransient<IKufTransferService, KufTransferService>();
                 services.AddTransient<IBoDocumentImportService, BoDocumentImportService>();
+                services.AddTransient<IWmsDocumentProcessingService, WmsDocumentProcessingService>();
 
 
             })

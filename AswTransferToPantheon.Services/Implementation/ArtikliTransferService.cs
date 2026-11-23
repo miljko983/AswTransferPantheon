@@ -34,7 +34,7 @@ namespace AswTransferToPantheon.Services.Implementation
             await ExecuteWithLogging("Artikli map", () => TransferArtikliMap(batchSize, token));
             await ExecuteWithLogging("Barkodovi", () => TransferBarkodovi(batchSize, token));
             await ExecuteWithLogging("Robne grupe", () => TransferRobneGrupe(batchSize, token));
-            await ExecuteWithLogging("CL_WMS artikli uvoz", () => ExecuteClWmsArtikliUvoz(token));
+    //        await ExecuteWithLogging("CL_WMS artikli uvoz", () => ExecuteClWmsArtikliUvoz(token));
         }
 
         private async Task ExecuteClWmsArtikliUvoz(CancellationToken token)

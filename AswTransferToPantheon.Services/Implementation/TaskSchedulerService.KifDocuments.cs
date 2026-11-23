@@ -19,7 +19,12 @@ public partial class TaskSchedulerService
         int batchSize, string groupName, string taskName)
     {
         var token = cancellationTokenSource.Token;
-        await kifExecutionGate.WaitAsync(token);
+        if (!await kifExecutionGate.WaitAsync(0, token))
+        {
+            WriteKifLog(groupName, taskName,
+                "KIF prolaz je već u toku ili čeka SQL bravu. Novi poziv je preskočen.");
+            return;
+        }
 
         try
         {
@@ -49,7 +54,7 @@ public partial class TaskSchedulerService
                 // Ne uslovljavamo nastavak brojem novih KIF-ova ili pojedinačnih grešaka.
                 var result = await ExecuteKifDocumentProcessingAsync(groupName, token);
 
-                // SQL obrada je završena pre slanja obaveštenja.
+                // SQL poziv je vratio rezultat ili grešku; ishod proveravamo u result.
                 if (badRecords.Count > 0)
                     await SendKifNotificationSafelyAsync(
                         groupName, taskName, $"{taskName}.BadRecords",
@@ -71,7 +76,10 @@ public partial class TaskSchedulerService
                                 groupName, KifProcessingTaskName, result, emailToken), token);
                 }
 
-                WriteKifLog(groupName, taskName, $"END {taskName}.");
+                WriteKifLog(groupName, taskName,
+                    result is not null && (!result.DocumentsResponseComplete || !result.PostingResponseComplete)
+                        ? $"END {taskName}: pokušaj je završen bez potvrde kompletne SQL obrade."
+                        : $"END {taskName}.");
             }
             catch (Exception) when (token.IsCancellationRequested)
             {

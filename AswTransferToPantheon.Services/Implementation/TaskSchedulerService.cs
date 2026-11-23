@@ -42,7 +42,8 @@ namespace AswTransferToPantheon.Services.Implementation
                                     IDocumentCreationService_CL_WMS documentCreationService_CL_WMS,
                                     ICentrosinergijaKreiranjeIdenataService centrosinergijaKreiranjeIdenataService,
                                     IBoDocumentImportService boDocumentImportService,
-                                    IKifDocumentProcessingService kifDocumentProcessingService)
+                                    IKifDocumentProcessingService kifDocumentProcessingService,
+                                    IWmsDocumentProcessingService wmsDocumentProcessingService)
         {
             this.schedulerConfiguration = schedulerConfiguration;
             this.kifTransferService = kifTransferService;
@@ -57,6 +58,7 @@ namespace AswTransferToPantheon.Services.Implementation
                 centrosinergijaKreiranjeIdenataService;
             this.boDocumentImportService = boDocumentImportService;
             this.kifDocumentProcessingService = kifDocumentProcessingService;
+            this.wmsDocumentProcessingService = wmsDocumentProcessingService;
         }
 
         public Task ScheduleTasks()
@@ -457,104 +459,9 @@ namespace AswTransferToPantheon.Services.Implementation
             }
         }
 
-        private async Task TransferNalozi(NaloziTaskConfiguration naloziTask)
+        private Task TransferNalozi(NaloziTaskConfiguration naloziTask)
         {
-            var groupName = Path.Combine("NaloziTasks", naloziTask.Name);
-
-            var taskName = naloziTask.Name;
-            var activeTaskName = taskName;
-
-            var badRecords = new List<BadRecordInfo>();
-            var kufBadRecords = new List<BadRecordInfo>();
-
-            kufTransferService.LogAction = CreateLogAction(groupName, nameof(TaskType.Kuf));
-            kufTransferService.BadRecordAction = (table, key, data, message, exception) =>
-            {
-                transferFileLogger.BadRecord(
-                    groupName, nameof(TaskType.Kuf), table, key, data, exception);
-                kufBadRecords.Add(new BadRecordInfo
-                {
-                    TableName = table,
-                    Key = key,
-                    Data = data,
-                    Message = message,
-                    Exception = exception.Message
-                });
-            };
-            naloziTransferService.KufTransferAction = async (nalogIds, token) =>
-            {
-                activeTaskName = nameof(TaskType.Kuf);
-                await kufTransferService.TransferForNalozi(nalogIds, naloziTask.BatchSize, token);
-                activeTaskName = taskName;
-            };
-
-            naloziTransferService.LogAction = CreateLogAction(groupName, taskName);
-
-            naloziTransferService.BadRecordAction =
-                (table, key, data, message, exception) =>
-                {
-                    transferFileLogger.BadRecord(
-                        groupName,
-                        taskName,
-                        table,
-                        key,
-                        data,
-                        exception);
-
-                    badRecords.Add(new BadRecordInfo
-                    {
-                        TableName = table,
-                        Key = key,
-                        Data = data,
-                        Message = message,
-                        Exception = exception.Message
-                    });
-                };
-
-            try
-            {
-                transferFileLogger.Info(
-                    groupName,
-                    taskName,
-                    $"START {taskName}. " +
-                    $"BatchSize: {naloziTask.BatchSize}, " +
-                    $"DatumOd: {naloziTask.DateFrom:yyyy-MM-dd}");
-
-                await naloziTransferService.Transfer(naloziTask.BatchSize, naloziTask.DateFrom, cancellationTokenSource.Token);
-
-                if (kufBadRecords.Count > 0)
-                {
-                    activeTaskName = nameof(TaskType.Kuf);
-                    await emailNotificationService.SendBadRecordsSummaryEmail(
-                        groupName, nameof(TaskType.Kuf), kufBadRecords, cancellationTokenSource.Token);
-                    activeTaskName = taskName;
-                }
-
-                if (badRecords.Count > 0)
-                {
-                    await emailNotificationService.SendBadRecordsSummaryEmail(groupName, taskName, badRecords, cancellationTokenSource.Token);
-                }
-
-                transferFileLogger.Info(groupName, taskName, $"END {taskName}.");
-            }
-            catch (Exception exception)
-            {
-                exception.Data[FailedTaskNameKey] = activeTaskName;
-                if (TransferErrorHelper.IsCriticalError(exception))
-                {
-                    var message = $"Kritična greška u tasku {activeTaskName}. " + "Trenutno izvršavanje se prekida do sledećeg termina.";
-
-                    await LogCritical(groupName, activeTaskName, message, exception);
-
-                    throw new CriticalTransferException(message, exception);
-                }
-
-                throw;
-            }
-            finally
-            {
-                naloziTransferService.KufTransferAction = null;
-            }
+            return TransferNaloziWithWmsAsync(naloziTask);
         }
 
         private Task TransferKif(int batchSize, string groupName, string taskName)
@@ -902,54 +809,9 @@ namespace AswTransferToPantheon.Services.Implementation
             }
         }
 
-        private async Task TransferVlpIzvSve(int batchSize, int daysBack, string groupName, string taskName)
+        private Task TransferVlpIzvSve(int batchSize, int daysBack, string groupName, string taskName)
         {
-            var badRecords = new List<BadRecordInfo>();
-
-            vlpIzvSveTransferService.LogAction = CreateLogAction(groupName, taskName);
-
-            vlpIzvSveTransferService.BadRecordAction = (table, key, data, message, ex) =>
-            {
-                transferFileLogger.BadRecord(groupName, taskName, table, key, data, ex);
-
-                badRecords.Add(new BadRecordInfo
-                {
-                    TableName = table,
-                    Key = key,
-                    Message = message,
-                    Data = data,
-                    Exception = ex.Message
-                });
-            };
-
-            try
-            {
-                transferFileLogger.Info(groupName, taskName, $"START {taskName}. " + $"BatchSize: {batchSize}, DaysBack: {daysBack}");
-
-                await vlpIzvSveTransferService.Transfer(batchSize, daysBack, cancellationTokenSource.Token);
-
-                if (badRecords.Count > 0)
-                {
-                    await emailNotificationService.SendBadRecordsSummaryEmail(groupName, taskName, badRecords, cancellationTokenSource.Token);
-                }
-
-                transferFileLogger.Info(groupName, taskName, $"END {taskName}.");
-            }
-            catch (Exception exception)
-            {
-                if (TransferErrorHelper.IsCriticalError(exception))
-                {
-                    var message =
-                        $"Kritična greška u tasku {taskName}. " +
-                        "Trenutno izvršavanje se prekida do sledećeg zakazanog termina.";
-
-                    await LogCritical(groupName, taskName, message, exception);
-
-                    throw new CriticalTransferException(message, exception);
-                }
-
-                throw;
-            }
+            return TransferVlpWithWmsAsync(batchSize, daysBack, groupName, taskName);
         }
 
 

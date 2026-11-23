@@ -65,19 +65,19 @@ namespace AswTransferToPantheon.Services.Implementation
                     vlpZaglavlja, eOtpremniceSeo, token);
 
                 totalKif += noviKifovi.Count;
-                totalStavke += kifStavke.Count;
+                totalStavke += seoResult.StavkeInserted;
                 totalSeoInserted += seoResult.Inserted;
                 totalSeoUpdated += seoResult.Updated;
                 LogAction?.Invoke(
                     $"KIF paket {batchNumber}: ubačeno {noviKifovi.Count} KIF, " +
-                    $"{kifStavke.Count} stavki, {kifDatumValute.Count} datum valute, " +
+                    $"{seoResult.StavkeInserted} stavki (postojećih identičnih: {kifStavke.Count - seoResult.StavkeInserted}), {kifDatumValute.Count} datum valute, " +
                     $"{kifKomentari.Count} komentara, {seoResult.VlpInserted} VLP zaglavlja. " +
                     $"eOtpremnicaSEO: novih {seoResult.Inserted}, osveženih {seoResult.Updated}.");
 
-                var artikalIds = kifStavke
-                    .Select(x => Convert.ToInt64(x.Artikal)).Distinct().ToList();
-                totalAktiviranihIdenata +=
-                    await AktivirajIdentePoKifStavkama(artikalIds, token);
+              //  var artikalIds = kifStavke
+              //      .Select(x => Convert.ToInt64(x.Artikal)).Distinct().ToList();
+              //  totalAktiviranihIdenata +=
+              //      await AktivirajIdentePoKifStavkama(artikalIds, token);
             }
 
             // Kandidati se čitaju tek kada su svi redovni KIF paketi potvrđeni.
@@ -862,7 +862,7 @@ namespace AswTransferToPantheon.Services.Implementation
                 .ToList();
         }
 
-        private async Task<(int Inserted, int Updated, int VlpInserted)> InsertKifPackage(
+        private async Task<(int Inserted, int Updated, int VlpInserted, int StavkeInserted)> InsertKifPackage(
             List<Kif> kifovi, List<KifStavka> kifStavke,
             List<KifDatumValute> kifDatumValute, List<KifKomentar> kifKomentari,
             List<VlpZaglavlje> vlpZaglavlja, List<EOtpremnicaSeo> eOtpremniceSeo,
@@ -875,14 +875,14 @@ namespace AswTransferToPantheon.Services.Implementation
             try
             {
                 await BulkInsertKif(connection, transaction, kifovi, token);
-                await BulkInsertKifStavke(connection, transaction, kifStavke, token);
+                var stavkeInserted = await BulkInsertKifStavke(connection, transaction, kifStavke, token);
                 await BulkInsertKifDatumValute(connection, transaction, kifDatumValute, token);
                 await BulkInsertKifKomentari(connection, transaction, kifKomentari, token);
                 var vlpInserted = await BulkInsertVlpZaglavlja(connection, transaction, vlpZaglavlja, token);
                 var result = await BulkInsertEOtpremnicaSeo(
                     connection, transaction, eOtpremniceSeo, token);
                 await transaction.CommitAsync(token);
-                return (result.Inserted, result.Updated, vlpInserted);
+                return (result.Inserted, result.Updated, vlpInserted, stavkeInserted);
             }
             catch
             {
@@ -940,12 +940,19 @@ namespace AswTransferToPantheon.Services.Implementation
             return table;
         }
 
-        private async Task BulkInsertKifStavke(SqlConnection connection, SqlTransaction transaction, List<KifStavka> kifStavke, CancellationToken token)
+        private async Task<int> BulkInsertKifStavke(SqlConnection connection, SqlTransaction transaction, List<KifStavka> kifStavke, CancellationToken token)
         {
             if (kifStavke.Count == 0)
             {
-                return;
+                return 0;
             }
+
+            var duplicate = kifStavke.GroupBy(x => (x.IdKifa, x.BrojStavke))
+                .FirstOrDefault(group => group.Count() > 1);
+            if (duplicate is not null)
+                throw new InvalidOperationException(
+                    $"ASW KIF paket sadrži ponovljen ključ: IDKIFA={duplicate.Key.IdKifa}; " +
+                    $"BROJSTAVKE={duplicate.Key.BrojStavke}. Paket nije upisan; proverite izvorne stavke.");
 
             var table = CreateKifStavkeDataTable(kifStavke);
 
@@ -956,21 +963,101 @@ namespace AswTransferToPantheon.Services.Implementation
                 row["INSERTUPDATE"] = "I";
             }
 
-            using var bulkCopy = new SqlBulkCopy(
-                connection,
-                SqlBulkCopyOptions.CheckConstraints,
-                transaction);
-
-            bulkCopy.DestinationTableName = "dbo.KIFSTAVKE";
-            bulkCopy.BatchSize = kifStavke.Count;
-            bulkCopy.BulkCopyTimeout = 60;
-
-            foreach (DataColumn column in table.Columns)
+            var columns = string.Join(", ", table.Columns.Cast<DataColumn>()
+                .Select(column => $"[{column.ColumnName}]"));
+            using (var createCommand = connection.CreateCommand())
             {
-                bulkCopy.ColumnMappings.Add(column.ColumnName, column.ColumnName);
+                createCommand.Transaction = transaction;
+                createCommand.CommandTimeout = 60;
+                createCommand.CommandText = $"""
+                    SELECT TOP (0) {columns}
+                    INTO #KifStavkeSync FROM dbo.KIFSTAVKE;
+                    CREATE UNIQUE CLUSTERED INDEX IX_KifStavkeSync_Key
+                        ON #KifStavkeSync (IDKIFA, BROJSTAVKE);
+                    """;
+                await createCommand.ExecuteNonQueryAsync(token);
             }
 
-            await bulkCopy.WriteToServerAsync(table);
+            using (var bulkCopy = new SqlBulkCopy(
+                connection, SqlBulkCopyOptions.CheckConstraints, transaction))
+            {
+                bulkCopy.DestinationTableName = "#KifStavkeSync";
+                bulkCopy.BatchSize = kifStavke.Count;
+                bulkCopy.BulkCopyTimeout = 60;
+                foreach (DataColumn column in table.Columns)
+                    bulkCopy.ColumnMappings.Add(column.ColumnName, column.ColumnName);
+                await bulkCopy.WriteToServerAsync(table, token);
+            }
+
+            using var command = connection.CreateCommand();
+            command.Transaction = transaction;
+            command.CommandTimeout = 120;
+            command.CommandText = BuildKifStavkeInsertSql(table);
+            var inserted = await command.ExecuteScalarAsync(token);
+            if (inserted is not int count || count < 0 || count > kifStavke.Count)
+                throw new InvalidOperationException("Nedostaje ispravan broj upisanih KIF stavki.");
+            return count;
+        }
+
+        private static string BuildKifStavkeInsertSql(DataTable table)
+        {
+            var columns = table.Columns.Cast<DataColumn>().ToArray();
+            var targetColumns = string.Join(", ", columns.Select(c => $"[{c.ColumnName}]"));
+            var sourceColumns = string.Join(", ", columns.Select(c => $"s.[{c.ColumnName}]"));
+            // INSERTUPDATE je oznaka prenosa; ne odredjuje jednakost poslovnih podataka.
+            var businessColumns = columns.Where(c => c.ColumnName != "INSERTUPDATE").ToArray();
+            string CompareColumns(string alias) => string.Join(", ", businessColumns.Select(c =>
+                c.DataType == typeof(string)
+                    ? $"CONVERT(varbinary(max), {alias}.[{c.ColumnName}])"
+                    : $"{alias}.[{c.ColumnName}]"));
+            return $"""
+                DECLARE @ConflictKif decimal(38,0), @ConflictBroj decimal(38,0);
+                DECLARE @Message nvarchar(2048), @Inserted int;
+
+                SELECT TOP (1) @ConflictKif = s.IDKIFA, @ConflictBroj = s.BROJSTAVKE
+                FROM #KifStavkeSync AS s
+                INNER JOIN dbo.KIFSTAVKE AS t WITH (UPDLOCK, HOLDLOCK)
+                    ON t.IDKIFA = s.IDKIFA AND t.BROJSTAVKE = s.BROJSTAVKE
+                GROUP BY s.IDKIFA, s.BROJSTAVKE
+                HAVING COUNT_BIG(*) > 1;
+                IF @ConflictKif IS NOT NULL
+                BEGIN
+                    SET @Message = CONCAT(N'KIFSTAVKE vec sadrzi duplikate. IDKIFA=',
+                        @ConflictKif, N'; BROJSTAVKE=', @ConflictBroj,
+                        N'. Paket nije upisan; prvo razresite postojece duplikate.');
+                    THROW 51730, @Message, 1;
+                END;
+
+                SELECT TOP (1) @ConflictKif = s.IDKIFA, @ConflictBroj = s.BROJSTAVKE
+                FROM #KifStavkeSync AS s
+                INNER JOIN dbo.KIFSTAVKE AS t WITH (UPDLOCK, HOLDLOCK)
+                    ON t.IDKIFA = s.IDKIFA AND t.BROJSTAVKE = s.BROJSTAVKE
+                WHERE EXISTS
+                (
+                    SELECT {CompareColumns("t")}
+                    EXCEPT
+                    SELECT {CompareColumns("s")}
+                );
+                IF @ConflictKif IS NOT NULL
+                BEGIN
+                    SET @Message = CONCAT(N'Postojeca KIF stavka ima drugacije podatke. IDKIFA=',
+                        @ConflictKif, N'; BROJSTAVKE=', @ConflictBroj,
+                        N'. Paket nije upisan; postojeca stavka nije automatski menjana.');
+                    THROW 51731, @Message, 1;
+                END;
+
+                INSERT INTO dbo.KIFSTAVKE ({targetColumns})
+                SELECT {sourceColumns}
+                FROM #KifStavkeSync AS s
+                WHERE NOT EXISTS
+                (
+                    SELECT 1 FROM dbo.KIFSTAVKE AS t WITH (UPDLOCK, HOLDLOCK)
+                    WHERE t.IDKIFA = s.IDKIFA AND t.BROJSTAVKE = s.BROJSTAVKE
+                );
+                SET @Inserted = @@ROWCOUNT;
+                DROP TABLE #KifStavkeSync;
+                SELECT @Inserted;
+                """;
         }
 
 

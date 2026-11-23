@@ -19,4 +19,7 @@ public interface IEmailNotificationService
     Task SendKifDocumentSuccessEmail(string groupName, string taskName, KifDocumentRunResult result, CancellationToken token);
 
     Task SendKifDocumentErrorsEmail(string groupName, string taskName, KifDocumentRunResult result, CancellationToken token);
+    Task SendWmsDocumentSuccessEmail(string groupName, string taskName, WmsDocumentRunResult result, CancellationToken token);
+
+    Task SendWmsDocumentErrorsEmail(string groupName, string taskName, WmsDocumentRunResult result, CancellationToken token);
 }
