@@ -9,7 +9,7 @@ using Microsoft.Data.SqlClient;
 
 namespace AswTransferToPantheon.Services.Implementation
 {
-    public class KifTransferService : IKifTransferService
+    public partial class KifTransferService : IKifTransferService
     {
         private readonly ConnectionStrings connectionStrings;
         public Action<string>? LogAction { get; set; }
@@ -83,6 +83,8 @@ namespace AswTransferToPantheon.Services.Implementation
             // Kandidati se čitaju tek kada su svi redovni KIF paketi potvrđeni.
             // Dopuna se izvršava i kada u ovom prolazu nije bilo novih KIF-ova.
             var totalVlpDopuna = await TransferMissingVlpZaglavlja(batchSize, token);
+
+            await TransferVlpZagSvojstvo(batchSize, token);
 
             LogAction?.Invoke(
                 $"KIF završen. Ukupno ubačeno: {totalKif} KIF, {totalStavke} stavki. " +
